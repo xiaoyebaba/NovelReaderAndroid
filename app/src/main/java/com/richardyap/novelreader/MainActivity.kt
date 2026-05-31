@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
+import android.graphics.BitmapFactory
+import android.graphics.Typeface as AndroidTypeface
 import androidx.activity.compose.BackHandler
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
@@ -21,6 +23,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.aspectRatio
@@ -72,7 +75,10 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
@@ -157,6 +163,8 @@ data class ReaderPrefs(
     val lineHeight: Float = 1.75f,
     val theme: String = "paper",
     val pageMode: String = "scroll",
+    val customBackgroundPath: String = "",
+    val customFontPath: String = "",
 )
 
 data class SyncPrefs(
@@ -782,6 +790,7 @@ private fun ReaderScreen(
     var showSearch by remember { mutableStateOf(false) }
     var showChrome by remember { mutableStateOf(true) }
     var pendingScrollItem by remember { mutableStateOf<Int?>(null) }
+    val scope = rememberCoroutineScope()
     val chapter = chapters[chapterIndex]
     val paragraphs = remember(book.id, chapterIndex) { chapter.toParagraphs() }
     val pages = remember(book.id, chapterIndex, prefs.fontSize, prefs.pageMode) {
@@ -797,6 +806,44 @@ private fun ReaderScreen(
     }
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialParagraph)
     val colors = readerColors(prefs.theme)
+    val customBackground = remember(prefs.customBackgroundPath) {
+        prefs.customBackgroundPath
+            .takeIf { it.isNotBlank() }
+            ?.let { path -> runCatching { BitmapFactory.decodeFile(path)?.asImageBitmap() }.getOrNull() }
+    }
+    val customFont = remember(prefs.customFontPath) {
+        prefs.customFontPath
+            .takeIf { it.isNotBlank() && File(it).exists() }
+            ?.let { path -> runCatching { FontFamily(AndroidTypeface.createFromFile(path)) }.getOrNull() }
+    }
+    val backgroundLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.copyReaderAsset(uri, "reader-background")
+                }
+            }.onSuccess { path ->
+                onUpdatePrefs(prefs.copy(customBackgroundPath = path))
+            }
+        }
+    }
+    val fontLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.copyReaderAsset(uri, "reader-font")
+                }
+            }.onSuccess { path ->
+                onUpdatePrefs(prefs.copy(customFontPath = path))
+            }
+        }
+    }
 
     BackHandler(enabled = !showSettings && !showCatalog && !showSearch) {
         onBack()
@@ -854,19 +901,28 @@ private fun ReaderScreen(
             .fillMaxSize()
             .background(colors.background),
     ) {
+        customBackground?.let { image ->
+            Image(
+                bitmap = image,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+                alpha = 0.18f,
+            )
+        }
         if (prefs.pageMode == "scroll") {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxSize()
-                    .statusBarsPadding()
+                    .then(if (showChrome) Modifier.statusBarsPadding() else Modifier)
                     .pointerInput(Unit) {
                         detectTapGestures(onTap = { showChrome = !showChrome })
                     }
                     .padding(horizontal = 22.dp),
             ) {
                 item {
-                    Spacer(Modifier.height(14.dp))
+                    Spacer(Modifier.height(if (showChrome) 14.dp else 0.dp))
                     Text(
                         text = chapter.title,
                         color = colors.text,
@@ -875,6 +931,7 @@ private fun ReaderScreen(
                         lineHeight = 24.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        fontFamily = customFont,
                     )
                     Spacer(Modifier.height(16.dp))
                 }
@@ -884,6 +941,7 @@ private fun ReaderScreen(
                         color = colors.text,
                         fontSize = prefs.fontSize.sp,
                         lineHeight = (prefs.fontSize * prefs.lineHeight).sp,
+                        fontFamily = customFont,
                         modifier = Modifier.padding(bottom = 14.dp),
                     )
                 }
@@ -896,6 +954,7 @@ private fun ReaderScreen(
                 pageIndex = pageIndex,
                 prefs = prefs,
                 colors = colors,
+                fontFamily = customFont,
                 modifier = Modifier.fillMaxSize(),
                 showChapterTitle = false,
                 onToggleChrome = { showChrome = !showChrome },
@@ -1016,6 +1075,21 @@ private fun ReaderScreen(
             prefs = prefs,
             onDismiss = { showSettings = false },
             onChange = onUpdatePrefs,
+            onPickBackground = { backgroundLauncher.launch(arrayOf("image/*")) },
+            onClearBackground = { onUpdatePrefs(prefs.copy(customBackgroundPath = "")) },
+            onPickFont = {
+                fontLauncher.launch(
+                    arrayOf(
+                        "font/ttf",
+                        "font/otf",
+                        "application/x-font-ttf",
+                        "application/x-font-otf",
+                        "application/octet-stream",
+                        "*/*",
+                    ),
+                )
+            },
+            onClearFont = { onUpdatePrefs(prefs.copy(customFontPath = "")) },
         )
     }
 
@@ -1113,6 +1187,7 @@ private fun PagedReaderContent(
     pageIndex: Int,
     prefs: ReaderPrefs,
     colors: ReaderPalette,
+    fontFamily: FontFamily?,
     modifier: Modifier = Modifier,
     showChapterTitle: Boolean,
     onToggleChrome: () -> Unit,
@@ -1122,7 +1197,7 @@ private fun PagedReaderContent(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .then(if (!showChapterTitle) Modifier.statusBarsPadding() else Modifier)
+            .then(if (showChapterTitle) Modifier.statusBarsPadding() else Modifier)
             .pointerInput(pageIndex, pages.size) {
                 detectTapGestures { offset ->
                     val third = size.width / 3f
@@ -1145,6 +1220,7 @@ private fun PagedReaderContent(
                     lineHeight = 28.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
+                    fontFamily = fontFamily,
                 )
                 Spacer(Modifier.height(16.dp))
             }
@@ -1154,6 +1230,7 @@ private fun PagedReaderContent(
                     color = colors.text,
                     fontSize = prefs.fontSize.sp,
                     lineHeight = (prefs.fontSize * prefs.lineHeight).sp,
+                    fontFamily = fontFamily,
                 )
             } else {
                 AnimatedContent(
@@ -1166,6 +1243,7 @@ private fun PagedReaderContent(
                         color = colors.text,
                         fontSize = prefs.fontSize.sp,
                         lineHeight = (prefs.fontSize * prefs.lineHeight).sp,
+                        fontFamily = fontFamily,
                     )
                 }
             }
@@ -1416,37 +1494,80 @@ private fun ReaderSettingsDialog(
     prefs: ReaderPrefs,
     onDismiss: () -> Unit,
     onChange: (ReaderPrefs) -> Unit,
+    onPickBackground: () -> Unit,
+    onClearBackground: () -> Unit,
+    onPickFont: () -> Unit,
+    onClearFont: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("阅读设置") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text("字号：${prefs.fontSize}")
-                Slider(
-                    value = prefs.fontSize.toFloat(),
-                    onValueChange = { onChange(prefs.copy(fontSize = it.roundToInt())) },
-                    valueRange = 16f..32f,
-                    steps = 15,
-                )
-                Text("行距：${String.format(Locale.CHINA, "%.1f", prefs.lineHeight)}")
-                Slider(
-                    value = prefs.lineHeight,
-                    onValueChange = { onChange(prefs.copy(lineHeight = it)) },
-                    valueRange = 1.3f..2.2f,
-                    steps = 8,
-                )
-                Text("翻页方式")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ThemeButton("滚动", prefs.pageMode == "scroll") { onChange(prefs.copy(pageMode = "scroll")) }
-                    ThemeButton("左右", prefs.pageMode == "page") { onChange(prefs.copy(pageMode = "page")) }
-                    ThemeButton("无动画", prefs.pageMode == "instant") { onChange(prefs.copy(pageMode = "instant")) }
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(460.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                item {
+                    Text("字号：${prefs.fontSize}")
+                    Slider(
+                        value = prefs.fontSize.toFloat(),
+                        onValueChange = { onChange(prefs.copy(fontSize = it.roundToInt())) },
+                        valueRange = 16f..32f,
+                        steps = 15,
+                    )
                 }
-                Text("背景")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ThemeButton("纸色", prefs.theme == "paper") { onChange(prefs.copy(theme = "paper")) }
-                    ThemeButton("青绿", prefs.theme == "green") { onChange(prefs.copy(theme = "green")) }
-                    ThemeButton("夜间", prefs.theme == "dark") { onChange(prefs.copy(theme = "dark")) }
+                item {
+                    Text("行距：${String.format(Locale.CHINA, "%.1f", prefs.lineHeight)}")
+                    Slider(
+                        value = prefs.lineHeight,
+                        onValueChange = { onChange(prefs.copy(lineHeight = it)) },
+                        valueRange = 1.3f..2.2f,
+                        steps = 8,
+                    )
+                }
+                item {
+                    Text("翻页方式")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ThemeButton("滚动", prefs.pageMode == "scroll") { onChange(prefs.copy(pageMode = "scroll")) }
+                        ThemeButton("左右", prefs.pageMode == "page") { onChange(prefs.copy(pageMode = "page")) }
+                        ThemeButton("无动画", prefs.pageMode == "instant") { onChange(prefs.copy(pageMode = "instant")) }
+                    }
+                }
+                item {
+                    Text("背景")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ThemeButton("纸色", prefs.theme == "paper") { onChange(prefs.copy(theme = "paper")) }
+                        ThemeButton("青绿", prefs.theme == "green") { onChange(prefs.copy(theme = "green")) }
+                        ThemeButton("夜间", prefs.theme == "dark") { onChange(prefs.copy(theme = "dark")) }
+                    }
+                }
+                item {
+                    Text("自定义背景")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onPickBackground) {
+                            Text(if (prefs.customBackgroundPath.isBlank()) "选择图片" else "更换图片")
+                        }
+                        if (prefs.customBackgroundPath.isNotBlank()) {
+                            TextButton(onClick = onClearBackground) {
+                                Text("清除")
+                            }
+                        }
+                    }
+                }
+                item {
+                    Text("自定义字体")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onPickFont) {
+                            Text(if (prefs.customFontPath.isBlank()) "选择字体" else "更换字体")
+                        }
+                        if (prefs.customFontPath.isNotBlank()) {
+                            TextButton(onClick = onClearFont) {
+                                Text("清除")
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -1575,6 +1696,8 @@ class NovelRepository(private val context: Context) {
         lineHeight = readerPrefs.getFloat("line_height", 1.75f),
         theme = readerPrefs.getString("theme", "paper") ?: "paper",
         pageMode = readerPrefs.getString("page_mode", "scroll") ?: "scroll",
+        customBackgroundPath = readerPrefs.getString("custom_background_path", "") ?: "",
+        customFontPath = readerPrefs.getString("custom_font_path", "") ?: "",
     )
 
     fun saveReaderPrefs(prefs: ReaderPrefs) {
@@ -1583,7 +1706,20 @@ class NovelRepository(private val context: Context) {
             .putFloat("line_height", prefs.lineHeight)
             .putString("theme", prefs.theme)
             .putString("page_mode", prefs.pageMode)
+            .putString("custom_background_path", prefs.customBackgroundPath)
+            .putString("custom_font_path", prefs.customFontPath)
             .apply()
+    }
+
+    fun copyReaderAsset(uri: Uri, prefix: String): String {
+        val displayName = getDisplayName(uri)
+        val extension = displayName.substringAfterLast('.', "").takeIf { it.isNotBlank() }?.let { ".$it" }.orEmpty()
+        val targetDir = File(context.filesDir, "reader-assets").also { it.mkdirs() }
+        val target = File(targetDir, "$prefix-${System.currentTimeMillis()}$extension")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            target.outputStream().use { output -> input.copyTo(output) }
+        } ?: error("无法读取文件")
+        return target.absolutePath
     }
 
     fun loadSyncPrefs(): SyncPrefs {
@@ -1658,6 +1794,8 @@ class NovelRepository(private val context: Context) {
                     lineHeight = remotePrefs.optDouble("lineHeight", 1.75).toFloat(),
                     theme = remotePrefs.optString("theme", "paper"),
                     pageMode = remotePrefs.optString("pageMode", "scroll"),
+                    customBackgroundPath = remotePrefs.optString("customBackgroundPath", ""),
+                    customFontPath = remotePrefs.optString("customFontPath", ""),
                 ),
             )
         }
@@ -1754,7 +1892,9 @@ class NovelRepository(private val context: Context) {
                     .put("fontSize", prefs.fontSize)
                     .put("lineHeight", prefs.lineHeight)
                     .put("theme", prefs.theme)
-                    .put("pageMode", prefs.pageMode),
+                    .put("pageMode", prefs.pageMode)
+                    .put("customBackgroundPath", prefs.customBackgroundPath)
+                    .put("customFontPath", prefs.customFontPath),
             )
             .put("books", bookArray)
     }
