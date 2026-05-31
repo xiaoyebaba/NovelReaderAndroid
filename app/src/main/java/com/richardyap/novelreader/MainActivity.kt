@@ -203,6 +203,14 @@ data class SyncPrefs(
     val autoCheckUpdates: Boolean = false,
 )
 
+data class BrowserPrefs(
+    val searchEngine: String = "百度",
+    val customSearchUrl: String = "https://www.baidu.com/s?wd={query}",
+    val sourceName: String = "通用正文",
+    val titleSelector: String = "",
+    val contentSelector: String = "",
+)
+
 data class Chapter(
     val title: String,
     val body: String,
@@ -236,6 +244,11 @@ private data class HttpResponse(
     val text: String,
 )
 
+private data class SearchEngine(
+    val name: String,
+    val urlPattern: String,
+)
+
 private val ChapterTitlePattern = Regex(
     pattern = """(?im)^[ \t　]*(第[零〇一二三四五六七八九十百千万两\d]+[章节卷回部][^\n]{0,36}|Chapter\s+\d+[^\n]{0,36}|\d{1,4}[、.．]\s*[^\n]{1,36})[ \t　]*$""",
 )
@@ -248,6 +261,12 @@ private const val FallbackChapterSize = 18_000
 private const val DefaultGithubOwner = "xiaoyebaba"
 private const val DefaultGithubRepo = "NovelReaderAndroid"
 private const val DefaultGithubAssetKeyword = ".apk"
+private val DefaultSearchEngines = listOf(
+    SearchEngine("百度", "https://www.baidu.com/s?wd={query}"),
+    SearchEngine("必应", "https://www.bing.com/search?q={query}"),
+    SearchEngine("搜狗", "https://www.sogou.com/web?query={query}"),
+    SearchEngine("自定义", "{custom}"),
+)
 
 @Composable
 private fun NovelTheme(content: @Composable () -> Unit) {
@@ -277,6 +296,7 @@ private fun NovelReaderApp(
     var bookmarks by remember { mutableStateOf(repository.loadBookmarks()) }
     var prefs by remember { mutableStateOf(repository.loadReaderPrefs()) }
     var syncPrefs by remember { mutableStateOf(repository.loadSyncPrefs()) }
+    var browserPrefs by remember { mutableStateOf(repository.loadBrowserPrefs()) }
     var activeBookId by remember { mutableStateOf<String?>(null) }
     var showCloudDialog by remember { mutableStateOf(false) }
     var showUpdateDialog by remember { mutableStateOf(false) }
@@ -392,10 +412,15 @@ private fun NovelReaderApp(
             BookshelfScreen(
                 books = books,
                 bookmarks = bookmarks,
+                browserPrefs = browserPrefs,
                 onImport = { importLauncher.launch(arrayOf("text/plain", "application/octet-stream", "*/*")) },
                 onCloud = { showCloudDialog = true },
                 onUpdate = { showUpdateDialog = true },
                 onImportWebPage = ::importWebPage,
+                onUpdateBrowserPrefs = {
+                    browserPrefs = it
+                    repository.saveBrowserPrefs(it)
+                },
                 onOpen = { activeBookId = it.id },
                 onOpenBookmark = { bookmark ->
                     val target = books.firstOrNull { it.id == bookmark.bookId }
@@ -520,10 +545,12 @@ private fun NovelReaderApp(
 private fun BookshelfScreen(
     books: List<Book>,
     bookmarks: List<Bookmark>,
+    browserPrefs: BrowserPrefs,
     onImport: () -> Unit,
     onCloud: () -> Unit,
     onUpdate: () -> Unit,
     onImportWebPage: (String, String) -> Unit,
+    onUpdateBrowserPrefs: (BrowserPrefs) -> Unit,
     onOpen: (Book) -> Unit,
     onOpenBookmark: (Bookmark) -> Unit,
     onDeleteBookmark: (Bookmark) -> Unit,
@@ -604,7 +631,11 @@ private fun BookshelfScreen(
                     .fillMaxWidth(),
             ) {
                 when (selectedBottomTab) {
-                    "内置浏览器" -> BrowserPanel(onImportWebPage = onImportWebPage)
+                    "内置浏览器" -> BrowserPanel(
+                        prefs = browserPrefs,
+                        onUpdatePrefs = onUpdateBrowserPrefs,
+                        onImportWebPage = onImportWebPage,
+                    )
                     "书签" -> BookmarkPanel(
                         bookmarks = bookmarks,
                         onOpenBookmark = onOpenBookmark,
@@ -847,13 +878,69 @@ private fun GlassPanel(
 }
 
 @Composable
-private fun BrowserPanel(onImportWebPage: (String, String) -> Unit) {
+private fun BrowserPanel(
+    prefs: BrowserPrefs,
+    onUpdatePrefs: (BrowserPrefs) -> Unit,
+    onImportWebPage: (String, String) -> Unit,
+) {
     var address by remember { mutableStateOf("https://www.baidu.com") }
     var pageTitle by remember { mutableStateOf("内置浏览器") }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    var canGoBack by remember { mutableStateOf(false) }
+    var showSourceAdapter by remember { mutableStateOf(false) }
+    var customSearchUrl by remember(prefs.customSearchUrl) { mutableStateOf(prefs.customSearchUrl) }
+    var sourceName by remember(prefs.sourceName) { mutableStateOf(prefs.sourceName) }
+    var titleSelector by remember(prefs.titleSelector) { mutableStateOf(prefs.titleSelector) }
+    var contentSelector by remember(prefs.contentSelector) { mutableStateOf(prefs.contentSelector) }
+
+    BackHandler(enabled = canGoBack) {
+        webView?.goBack()
+        canGoBack = webView?.canGoBack() == true
+    }
 
     fun loadTarget() {
-        webView?.loadUrl(normalizeBrowserInput(address))
+        webView?.loadUrl(normalizeBrowserInput(address, prefs))
+    }
+
+    fun saveBrowserSettings(nextEngine: String = prefs.searchEngine) {
+        onUpdatePrefs(
+            prefs.copy(
+                searchEngine = nextEngine,
+                customSearchUrl = customSearchUrl.trim().ifBlank { "https://www.baidu.com/s?wd={query}" },
+                sourceName = sourceName.trim().ifBlank { "通用正文" },
+                titleSelector = titleSelector.trim(),
+                contentSelector = contentSelector.trim(),
+            ),
+        )
+    }
+
+    fun importCurrentPage() {
+        val script = """
+            (function(){
+                function read(selector) {
+                    if (!selector) return '';
+                    try {
+                        var node = document.querySelector(selector);
+                        return node ? (node.innerText || node.textContent || '') : '';
+                    } catch(e) {
+                        return '';
+                    }
+                }
+                var title = read(${JSONObject.quote(prefs.titleSelector)});
+                var content = read(${JSONObject.quote(prefs.contentSelector)});
+                if (!title) title = document.title || '';
+                if (!content) content = document.body ? document.body.innerText : '';
+                return title + '\n\n' + content;
+            })();
+        """.trimIndent()
+
+        webView?.evaluateJavascript(script) { encoded ->
+            val extracted = runCatching {
+                JSONObject("{\"value\":$encoded}").optString("value", "")
+            }.getOrDefault("")
+            val title = extracted.lineSequence().firstOrNull()?.takeIf { it.isNotBlank() } ?: pageTitle
+            onImportWebPage(title, extracted)
+        }
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -878,23 +965,77 @@ private fun BrowserPanel(onImportWebPage: (String, String) -> Unit) {
                 }
             }
             Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {
-                    webView?.evaluateJavascript(
-                        """
-                        (function(){
-                            return (document.title || '') + '\n\n' + (document.body ? document.body.innerText : '');
-                        })();
-                        """.trimIndent(),
-                    ) { encoded ->
-                        val extracted = runCatching {
-                            JSONObject("{\"value\":$encoded}").optString("value", "")
-                        }.getOrDefault("")
-                        val title = pageTitle.ifBlank { extracted.lineSequence().firstOrNull().orEmpty() }
-                        onImportWebPage(title, extracted)
-                    }
-                }) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        webView?.goBack()
+                        canGoBack = webView?.canGoBack() == true
+                    },
+                    enabled = canGoBack,
+                ) {
+                    Text("后退")
+                }
+                OutlinedButton(onClick = ::importCurrentPage) {
                     Text("加入书架")
+                }
+                OutlinedButton(onClick = { showSourceAdapter = !showSourceAdapter }) {
+                    Text("书源适配")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DefaultSearchEngines.forEach { engine ->
+                    ThemeButton(engine.name, prefs.searchEngine == engine.name) {
+                        saveBrowserSettings(engine.name)
+                    }
+                }
+            }
+            if (prefs.searchEngine == "自定义") {
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = customSearchUrl,
+                    onValueChange = {
+                        customSearchUrl = it
+                        onUpdatePrefs(prefs.copy(customSearchUrl = it))
+                    },
+                    label = { Text("自定义搜索 URL，使用 {query} 代表关键词") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (showSourceAdapter) {
+                Spacer(Modifier.height(10.dp))
+                Text("书源适配", color = Color(0xFF526079), fontWeight = FontWeight.Black)
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = sourceName,
+                    onValueChange = { sourceName = it },
+                    label = { Text("书源名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = titleSelector,
+                    onValueChange = { titleSelector = it },
+                    label = { Text("标题选择器，例如 h1") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = contentSelector,
+                    onValueChange = { contentSelector = it },
+                    label = { Text("正文选择器，例如 .content") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = { saveBrowserSettings() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("保存书源")
                 }
             }
         }
@@ -916,6 +1057,7 @@ private fun BrowserPanel(onImportWebPage: (String, String) -> Unit) {
                             override fun onPageFinished(view: WebView, url: String) {
                                 address = url
                                 pageTitle = view.title.orEmpty()
+                                canGoBack = view.canGoBack()
                             }
                         }
                         webChromeClient = object : WebChromeClient() {
@@ -1257,7 +1399,7 @@ private fun formatUpdateNotes(notes: String): List<String> {
         }
 }
 
-private fun normalizeBrowserInput(input: String): String {
+private fun normalizeBrowserInput(input: String, prefs: BrowserPrefs): String {
     val target = input.trim()
     if (target.startsWith("http://", ignoreCase = true) || target.startsWith("https://", ignoreCase = true)) {
         return target
@@ -1266,7 +1408,12 @@ private fun normalizeBrowserInput(input: String): String {
         return "https://$target"
     }
     val encoded = URLEncoder.encode(target.ifBlank { "小说" }, "UTF-8")
-    return "https://www.baidu.com/s?wd=$encoded"
+    val engine = DefaultSearchEngines.firstOrNull { it.name == prefs.searchEngine }
+    val pattern = if (engine?.name == "自定义") prefs.customSearchUrl else engine?.urlPattern
+    return pattern
+        .orEmpty()
+        .ifBlank { "https://www.baidu.com/s?wd={query}" }
+        .replace("{query}", encoded)
 }
 
 @Composable
@@ -2346,6 +2493,7 @@ class NovelRepository(private val context: Context) {
     private val bookmarkPrefs = context.getSharedPreferences("novel_bookmarks", Context.MODE_PRIVATE)
     private val readerPrefs = context.getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
     private val syncPrefs = context.getSharedPreferences("sync_prefs", Context.MODE_PRIVATE)
+    private val browserPrefs = context.getSharedPreferences("browser_prefs", Context.MODE_PRIVATE)
     private val booksDir: File
         get() = File(context.filesDir, "books").also { it.mkdirs() }
 
@@ -2457,6 +2605,25 @@ class NovelRepository(private val context: Context) {
             .putString("page_mode", prefs.pageMode)
             .putString("custom_background_path", prefs.customBackgroundPath)
             .putString("custom_font_path", prefs.customFontPath)
+            .apply()
+    }
+
+    fun loadBrowserPrefs(): BrowserPrefs = BrowserPrefs(
+        searchEngine = browserPrefs.getString("search_engine", "百度") ?: "百度",
+        customSearchUrl = browserPrefs.getString("custom_search_url", "https://www.baidu.com/s?wd={query}")
+            ?: "https://www.baidu.com/s?wd={query}",
+        sourceName = browserPrefs.getString("source_name", "通用正文") ?: "通用正文",
+        titleSelector = browserPrefs.getString("title_selector", "") ?: "",
+        contentSelector = browserPrefs.getString("content_selector", "") ?: "",
+    )
+
+    fun saveBrowserPrefs(prefs: BrowserPrefs) {
+        browserPrefs.edit()
+            .putString("search_engine", prefs.searchEngine)
+            .putString("custom_search_url", prefs.customSearchUrl)
+            .putString("source_name", prefs.sourceName)
+            .putString("title_selector", prefs.titleSelector)
+            .putString("content_selector", prefs.contentSelector)
             .apply()
     }
 
