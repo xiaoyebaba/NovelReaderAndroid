@@ -165,8 +165,8 @@ data class SyncPrefs(
     val password: String = "",
     val remoteFile: String = "novelreader-backup.json",
     val updateManifestUrl: String = "",
-    val githubOwner: String = "",
-    val githubRepo: String = "",
+    val githubOwner: String = DefaultGithubOwner,
+    val githubRepo: String = DefaultGithubRepo,
     val githubAssetKeyword: String = ".apk",
 )
 
@@ -204,6 +204,9 @@ private val SpecialChapterTitlePattern = Regex(
 )
 
 private const val FallbackChapterSize = 18_000
+private const val DefaultGithubOwner = "xiaoyebaba"
+private const val DefaultGithubRepo = "NovelReaderAndroid"
+private const val DefaultGithubAssetKeyword = ".apk"
 
 @Composable
 private fun NovelTheme(content: @Composable () -> Unit) {
@@ -234,6 +237,7 @@ private fun NovelReaderApp(
     var syncPrefs by remember { mutableStateOf(repository.loadSyncPrefs()) }
     var activeBookId by remember { mutableStateOf<String?>(null) }
     var showCloudDialog by remember { mutableStateOf(false) }
+    var pendingUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
     val snackbars = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -375,9 +379,7 @@ private fun NovelReaderApp(
                             isVersionNameNewer(update.versionName, BuildConfig.VERSION_NAME)
                         }
                         if (hasNewerVersion) {
-                            val targetUrl = update.apkUrl.ifBlank { update.releaseUrl }
-                            snackbars.showSnackbar("发现新版 ${update.versionName}，正在打开下载地址")
-                            if (targetUrl.isNotBlank()) onOpenUrl(targetUrl)
+                            pendingUpdate = update
                         } else {
                             snackbars.showSnackbar("当前已是最新版本")
                         }
@@ -385,6 +387,18 @@ private fun NovelReaderApp(
                         snackbars.showSnackbar("检查更新失败：${it.message ?: "请检查更新地址"}")
                     }
                 }
+            },
+        )
+    }
+
+    pendingUpdate?.let { update ->
+        UpdateAvailableDialog(
+            update = update,
+            onDismiss = { pendingUpdate = null },
+            onDownload = {
+                val targetUrl = update.apkUrl.ifBlank { update.releaseUrl }
+                pendingUpdate = null
+                if (targetUrl.isNotBlank()) onOpenUrl(targetUrl)
             },
         )
     }
@@ -488,9 +502,6 @@ private fun CloudSyncDialog(
     var password by remember(prefs) { mutableStateOf(prefs.password) }
     var remoteFile by remember(prefs) { mutableStateOf(prefs.remoteFile) }
     var updateManifestUrl by remember(prefs) { mutableStateOf(prefs.updateManifestUrl) }
-    var githubOwner by remember(prefs) { mutableStateOf(prefs.githubOwner) }
-    var githubRepo by remember(prefs) { mutableStateOf(prefs.githubRepo) }
-    var githubAssetKeyword by remember(prefs) { mutableStateOf(prefs.githubAssetKeyword) }
 
     fun nextPrefs(): SyncPrefs = SyncPrefs(
         webDavUrl = webDavUrl.trim(),
@@ -498,9 +509,9 @@ private fun CloudSyncDialog(
         password = password,
         remoteFile = remoteFile.trim().ifBlank { "novelreader-backup.json" },
         updateManifestUrl = updateManifestUrl.trim(),
-        githubOwner = githubOwner.trim(),
-        githubRepo = githubRepo.trim(),
-        githubAssetKeyword = githubAssetKeyword.trim().ifBlank { ".apk" },
+        githubOwner = DefaultGithubOwner,
+        githubRepo = DefaultGithubRepo,
+        githubAssetKeyword = DefaultGithubAssetKeyword,
     )
 
     AlertDialog(
@@ -564,47 +575,19 @@ private fun CloudSyncDialog(
                 }
                 item {
                     Spacer(Modifier.height(8.dp))
-                    Text("GitHub 更新", fontWeight = FontWeight.Bold)
+                    Text("软件更新", fontWeight = FontWeight.Bold)
                 }
                 item {
-                    OutlinedTextField(
-                        value = githubOwner,
-                        onValueChange = { githubOwner = it },
-                        label = { Text("GitHub 用户名 / 组织名") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = githubRepo,
-                        onValueChange = { githubRepo = it },
-                        label = { Text("仓库名") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = githubAssetKeyword,
-                        onValueChange = { githubAssetKeyword = it },
-                        label = { Text("APK 文件匹配关键词") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                item {
-                    OutlinedTextField(
-                        value = updateManifestUrl,
-                        onValueChange = { updateManifestUrl = it },
-                        label = { Text("备用更新清单 URL") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
+                    Text(
+                        text = "更新源：GitHub Releases / $DefaultGithubOwner/$DefaultGithubRepo",
+                        color = Color(0xFF777A82),
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
                     )
                 }
                 item {
                     Text(
-                        text = "优先检查 GitHub Releases；仓库没填时才使用备用 JSON 清单。",
+                        text = "用户无需填写配置。发布新版本时，只要在该仓库创建新的 Release 并上传 APK 即可。",
                         color = Color(0xFF777A82),
                         fontSize = 12.sp,
                         lineHeight = 17.sp,
@@ -625,6 +608,45 @@ private fun CloudSyncDialog(
         confirmButton = {
             Button(onClick = { onSave(nextPrefs()) }) {
                 Text("保存")
+            }
+        },
+    )
+}
+
+@Composable
+private fun UpdateAvailableDialog(
+    update: UpdateInfo,
+    onDismiss: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("发现新版 ${update.versionName}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = update.notes.ifBlank { "这个版本没有填写更新日志。" },
+                    color = Color(0xFF3F4248),
+                    lineHeight = 20.sp,
+                )
+                if (update.apkUrl.isNotBlank()) {
+                    Text(
+                        text = "下载链接已就绪，点击下方按钮会跳转浏览器下载 APK。",
+                        color = Color(0xFF777A82),
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                    )
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("稍后")
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDownload) {
+                Text("下载更新")
             }
         },
     )
@@ -1564,16 +1586,21 @@ class NovelRepository(private val context: Context) {
             .apply()
     }
 
-    fun loadSyncPrefs(): SyncPrefs = SyncPrefs(
-        webDavUrl = syncPrefs.getString("webdav_url", "") ?: "",
-        username = syncPrefs.getString("username", "") ?: "",
-        password = syncPrefs.getString("password", "") ?: "",
-        remoteFile = syncPrefs.getString("remote_file", "novelreader-backup.json") ?: "novelreader-backup.json",
-        updateManifestUrl = syncPrefs.getString("update_manifest_url", "") ?: "",
-        githubOwner = syncPrefs.getString("github_owner", "") ?: "",
-        githubRepo = syncPrefs.getString("github_repo", "") ?: "",
-        githubAssetKeyword = syncPrefs.getString("github_asset_keyword", ".apk") ?: ".apk",
-    )
+    fun loadSyncPrefs(): SyncPrefs {
+        val owner = syncPrefs.getString("github_owner", DefaultGithubOwner).orEmpty()
+        val repo = syncPrefs.getString("github_repo", DefaultGithubRepo).orEmpty()
+        val assetKeyword = syncPrefs.getString("github_asset_keyword", DefaultGithubAssetKeyword).orEmpty()
+        return SyncPrefs(
+            webDavUrl = syncPrefs.getString("webdav_url", "") ?: "",
+            username = syncPrefs.getString("username", "") ?: "",
+            password = syncPrefs.getString("password", "") ?: "",
+            remoteFile = syncPrefs.getString("remote_file", "novelreader-backup.json") ?: "novelreader-backup.json",
+            updateManifestUrl = syncPrefs.getString("update_manifest_url", "") ?: "",
+            githubOwner = owner.ifBlank { DefaultGithubOwner },
+            githubRepo = repo.ifBlank { DefaultGithubRepo },
+            githubAssetKeyword = assetKeyword.ifBlank { DefaultGithubAssetKeyword },
+        )
+    }
 
     fun saveSyncPrefs(prefs: SyncPrefs) {
         syncPrefs.edit()
