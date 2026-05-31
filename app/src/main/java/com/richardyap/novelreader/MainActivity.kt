@@ -62,6 +62,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
@@ -178,6 +179,7 @@ data class SyncPrefs(
     val githubOwner: String = DefaultGithubOwner,
     val githubRepo: String = DefaultGithubRepo,
     val githubAssetKeyword: String = ".apk",
+    val autoCheckUpdates: Boolean = false,
 )
 
 data class Chapter(
@@ -255,6 +257,7 @@ private fun NovelReaderApp(
     var syncPrefs by remember { mutableStateOf(repository.loadSyncPrefs()) }
     var activeBookId by remember { mutableStateOf<String?>(null) }
     var showCloudDialog by remember { mutableStateOf(false) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
     var pendingUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
     val snackbars = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -304,10 +307,43 @@ private fun NovelReaderApp(
         }
     }
 
+    fun checkForUpdate(next: SyncPrefs, silent: Boolean) {
+        syncPrefs = next
+        repository.saveSyncPrefs(next)
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.checkUpdate(next)
+                }
+            }.onSuccess { update ->
+                val hasNewerVersion = if (update.versionCode > 0) {
+                    update.versionCode > BuildConfig.VERSION_CODE
+                } else {
+                    isVersionNameNewer(update.versionName, BuildConfig.VERSION_NAME)
+                }
+                if (hasNewerVersion) {
+                    pendingUpdate = update
+                } else if (!silent) {
+                    snackbars.showSnackbar("当前已是最新版本")
+                }
+            }.onFailure {
+                if (!silent) {
+                    snackbars.showSnackbar("检查更新失败：${it.message ?: "请检查网络"}")
+                }
+            }
+        }
+    }
+
     LaunchedEffect(incomingImportUri) {
         val uri = incomingImportUri ?: return@LaunchedEffect
         importUri(uri)
         onIncomingImportConsumed()
+    }
+
+    LaunchedEffect(Unit) {
+        if (syncPrefs.autoCheckUpdates) {
+            checkForUpdate(syncPrefs, silent = true)
+        }
     }
 
     val activeBook = books.firstOrNull { it.id == activeBookId }
@@ -317,6 +353,7 @@ private fun NovelReaderApp(
                 books = books,
                 onImport = { importLauncher.launch(arrayOf("text/plain", "application/octet-stream", "*/*")) },
                 onCloud = { showCloudDialog = true },
+                onUpdate = { showUpdateDialog = true },
                 onOpen = { activeBookId = it.id },
                 onDelete = { book ->
                     repository.deleteBook(book)
@@ -382,30 +419,19 @@ private fun NovelReaderApp(
                     }
                 }
             },
-            onCheckUpdate = { next ->
+        )
+    }
+
+    if (showUpdateDialog) {
+        UpdateSettingsDialog(
+            prefs = syncPrefs,
+            onDismiss = { showUpdateDialog = false },
+            onSave = { next ->
                 syncPrefs = next
                 repository.saveSyncPrefs(next)
-                scope.launch {
-                    runCatching {
-                        withContext(Dispatchers.IO) {
-                            repository.checkUpdate(next)
-                        }
-                    }.onSuccess { update ->
-                        val hasNewerVersion = if (update.versionCode > 0) {
-                            update.versionCode > BuildConfig.VERSION_CODE
-                        } else {
-                            isVersionNameNewer(update.versionName, BuildConfig.VERSION_NAME)
-                        }
-                        if (hasNewerVersion) {
-                            pendingUpdate = update
-                        } else {
-                            snackbars.showSnackbar("当前已是最新版本")
-                        }
-                    }.onFailure {
-                        snackbars.showSnackbar("检查更新失败：${it.message ?: "请检查更新地址"}")
-                    }
-                }
+                scope.launch { snackbars.showSnackbar("更新设置已保存") }
             },
+            onCheckUpdate = { next -> checkForUpdate(next, silent = false) },
         )
     }
 
@@ -427,6 +453,7 @@ private fun BookshelfScreen(
     books: List<Book>,
     onImport: () -> Unit,
     onCloud: () -> Unit,
+    onUpdate: () -> Unit,
     onOpen: (Book) -> Unit,
     onDelete: (Book) -> Unit,
     modifier: Modifier = Modifier,
@@ -446,20 +473,11 @@ private fun BookshelfScreen(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column {
+            Column(Modifier.weight(1f)) {
                 Text("竹简阅读", fontSize = 32.sp, fontWeight = FontWeight.Black)
                 Text("本地 TXT 小说阅读器", color = Color(0xFF777A82), fontSize = 14.sp)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onCloud) {
-                    Text("云同步")
-                }
-                Button(onClick = onImport) {
-                    Text("导入")
-                }
             }
         }
 
@@ -473,36 +491,99 @@ private fun BookshelfScreen(
         )
         Spacer(Modifier.height(16.dp))
 
-        if (filteredBooks.isEmpty()) {
-            EmptyShelf(onImport = onImport)
-        } else {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 136.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                gridItems(filteredBooks, key = { it.id }) { book ->
-                    BookCard(book = book, onOpen = onOpen, onDelete = onDelete)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        ) {
+            if (filteredBooks.isEmpty()) {
+                EmptyShelf()
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 136.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    contentPadding = PaddingValues(bottom = 16.dp),
+                ) {
+                    gridItems(filteredBooks, key = { it.id }) { book ->
+                        BookCard(book = book, onOpen = onOpen, onDelete = onDelete)
+                    }
                 }
             }
         }
+
+        ShelfSettingsBar(
+            onImport = onImport,
+            onCloud = onCloud,
+            onUpdate = onUpdate,
+        )
     }
 }
 
 @Composable
-private fun EmptyShelf(onImport: () -> Unit) {
+private fun EmptyShelf() {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("书架还是空的", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("导入一个 .txt 文件，就能开始阅读。", color = Color(0xFF777A82))
-            Spacer(Modifier.height(16.dp))
-            OutlinedButton(onClick = onImport) {
-                Text("选择本地小说")
-            }
+            Text("从底部设置栏导入本地小说。", color = Color(0xFF777A82))
         }
+    }
+}
+
+@Composable
+private fun ShelfSettingsBar(
+    onImport: () -> Unit,
+    onCloud: () -> Unit,
+    onUpdate: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding(),
+    ) {
+        Divider(color = Color(0xFFE4E5E8))
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "设置",
+            color = Color(0xFF777A82),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ShelfActionButton(label = "导入", onClick = onImport, modifier = Modifier.weight(1f))
+            ShelfActionButton(label = "云同步", onClick = onCloud, modifier = Modifier.weight(1f))
+            ShelfActionButton(label = "更新", onClick = onUpdate, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun ShelfActionButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier
+            .height(46.dp)
+            .defaultMinSize(minWidth = 1.dp, minHeight = 46.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+    ) {
+        Text(
+            text = label,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -513,33 +594,32 @@ private fun CloudSyncDialog(
     onSave: (SyncPrefs) -> Unit,
     onUpload: (SyncPrefs) -> Unit,
     onRestore: (SyncPrefs) -> Unit,
-    onCheckUpdate: (SyncPrefs) -> Unit,
 ) {
     var webDavUrl by remember(prefs) { mutableStateOf(prefs.webDavUrl) }
     var username by remember(prefs) { mutableStateOf(prefs.username) }
     var password by remember(prefs) { mutableStateOf(prefs.password) }
     var remoteFile by remember(prefs) { mutableStateOf(prefs.remoteFile) }
-    var updateManifestUrl by remember(prefs) { mutableStateOf(prefs.updateManifestUrl) }
 
     fun nextPrefs(): SyncPrefs = SyncPrefs(
         webDavUrl = webDavUrl.trim(),
         username = username.trim(),
         password = password,
         remoteFile = remoteFile.trim().ifBlank { "novelreader-backup.json" },
-        updateManifestUrl = updateManifestUrl.trim(),
+        updateManifestUrl = prefs.updateManifestUrl,
         githubOwner = DefaultGithubOwner,
         githubRepo = DefaultGithubRepo,
         githubAssetKeyword = DefaultGithubAssetKeyword,
+        autoCheckUpdates = prefs.autoCheckUpdates,
     )
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("云同步 / 更新") },
+        title = { Text("云同步") },
         text = {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(480.dp),
+                    .height(360.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 item {
@@ -591,30 +671,79 @@ private fun CloudSyncDialog(
                         }
                     }
                 }
-                item {
-                    Spacer(Modifier.height(8.dp))
-                    Text("软件更新", fontWeight = FontWeight.Bold)
-                }
-                item {
-                    Text(
-                        text = "更新源：GitHub Releases / $DefaultGithubOwner/$DefaultGithubRepo",
-                        color = Color(0xFF777A82),
-                        fontSize = 13.sp,
-                        lineHeight = 18.sp,
-                    )
-                }
-                item {
-                    Text(
-                        text = "用户无需填写配置。发布新版本时，只要在该仓库创建新的 Release 并上传 APK 即可。",
-                        color = Color(0xFF777A82),
-                        fontSize = 12.sp,
-                        lineHeight = 17.sp,
-                    )
-                }
-                item {
-                    OutlinedButton(onClick = { onCheckUpdate(nextPrefs()) }) {
-                        Text("检查更新")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(nextPrefs()) }) {
+                Text("保存")
+            }
+        },
+    )
+}
+
+@Composable
+private fun UpdateSettingsDialog(
+    prefs: SyncPrefs,
+    onDismiss: () -> Unit,
+    onSave: (SyncPrefs) -> Unit,
+    onCheckUpdate: (SyncPrefs) -> Unit,
+) {
+    var autoCheckUpdates by remember(prefs) { mutableStateOf(prefs.autoCheckUpdates) }
+
+    fun nextPrefs(): SyncPrefs = prefs.copy(
+        updateManifestUrl = "",
+        githubOwner = DefaultGithubOwner,
+        githubRepo = DefaultGithubRepo,
+        githubAssetKeyword = DefaultGithubAssetKeyword,
+        autoCheckUpdates = autoCheckUpdates,
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("软件更新") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text(
+                    text = "更新源：GitHub Releases / $DefaultGithubOwner/$DefaultGithubRepo",
+                    color = Color(0xFF777A82),
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                )
+                Text(
+                    text = "发布新版时，只要在 GitHub 仓库创建新的 Release 并上传 APK，用户点击检查更新就能看到更新内容和下载入口。",
+                    color = Color(0xFF777A82),
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("启动时自动检查", fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "开启后，每次打开软件会静默检查一次，有新版本时再提醒。",
+                            color = Color(0xFF777A82),
+                            fontSize = 12.sp,
+                            lineHeight = 17.sp,
+                        )
                     }
+                    Switch(
+                        checked = autoCheckUpdates,
+                        onCheckedChange = { autoCheckUpdates = it },
+                    )
+                }
+                Button(
+                    onClick = { onCheckUpdate(nextPrefs()) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("检查更新")
                 }
             }
         },
@@ -637,16 +766,42 @@ private fun UpdateAvailableDialog(
     onDismiss: () -> Unit,
     onDownload: () -> Unit,
 ) {
+    val noteLines = remember(update.notes) { formatUpdateNotes(update.notes) }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("发现新版 ${update.versionName}") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = update.notes.ifBlank { "这个版本没有填写更新日志。" },
-                    color = Color(0xFF3F4248),
-                    lineHeight = 20.sp,
-                )
+                if (noteLines.isEmpty()) {
+                    Text(
+                        text = "这个版本没有填写更新日志。",
+                        color = Color(0xFF3F4248),
+                        lineHeight = 20.sp,
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(180.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(noteLines) { line ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text("•", color = Color(0xFFE5484D), fontWeight = FontWeight.Bold)
+                                Text(
+                                    text = line,
+                                    color = Color(0xFF3F4248),
+                                    lineHeight = 20.sp,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
+                    }
+                }
                 if (update.apkUrl.isNotBlank()) {
                     Text(
                         text = "下载链接已就绪，点击下方按钮会跳转浏览器下载 APK。",
@@ -668,6 +823,29 @@ private fun UpdateAvailableDialog(
             }
         },
     )
+}
+
+private fun formatUpdateNotes(notes: String): List<String> {
+    val normalized = notes
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+
+    return normalized
+        .lines()
+        .map { line ->
+            line.trim()
+                .removePrefix("-")
+                .removePrefix("*")
+                .removePrefix("•")
+                .trim()
+        }
+        .filter { line ->
+            line.isNotBlank() &&
+                !line.equals("更新内容：", ignoreCase = true) &&
+                !line.equals("更新内容:", ignoreCase = true)
+        }
 }
 
 @Composable
@@ -1782,6 +1960,7 @@ class NovelRepository(private val context: Context) {
             githubOwner = owner.ifBlank { DefaultGithubOwner },
             githubRepo = repo.ifBlank { DefaultGithubRepo },
             githubAssetKeyword = assetKeyword.ifBlank { DefaultGithubAssetKeyword },
+            autoCheckUpdates = syncPrefs.getBoolean("auto_check_updates", false),
         )
     }
 
@@ -1795,6 +1974,7 @@ class NovelRepository(private val context: Context) {
             .putString("github_owner", prefs.githubOwner)
             .putString("github_repo", prefs.githubRepo)
             .putString("github_asset_keyword", prefs.githubAssetKeyword)
+            .putBoolean("auto_check_updates", prefs.autoCheckUpdates)
             .apply()
     }
 
