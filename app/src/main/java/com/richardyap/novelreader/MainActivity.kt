@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,7 +40,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -77,6 +80,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -232,14 +237,14 @@ private const val DefaultGithubAssetKeyword = ".apk"
 private fun NovelTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = lightColorScheme(
-            primary = Color(0xFFE5484D),
-            secondary = Color(0xFF2F3136),
-            background = Color(0xFFF6F7F9),
+            primary = Color(0xFF1677FF),
+            secondary = Color(0xFF5A6F95),
+            background = Color(0xFFF4F8FF),
             surface = Color(0xFFFFFFFF),
             onPrimary = Color.White,
             onSecondary = Color.White,
-            onBackground = Color(0xFF16171A),
-            onSurface = Color(0xFF16171A),
+            onBackground = Color(0xFF0E1726),
+            onSurface = Color(0xFF0E1726),
         ),
         content = content,
     )
@@ -459,64 +464,101 @@ private fun BookshelfScreen(
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
-    val filteredBooks = remember(books, query) {
-        if (query.isBlank()) books else books.filter {
-            it.title.contains(query.trim(), ignoreCase = true)
+    var showSearch by remember { mutableStateOf(false) }
+    var showQuickActions by remember { mutableStateOf(false) }
+    var selectedTopTab by remember { mutableStateOf("全部") }
+    var selectedBottomTab by remember { mutableStateOf("书架") }
+    val filteredBooks = remember(books, query, selectedTopTab) {
+        val base = if (query.isBlank()) {
+            books
+        } else {
+            books.filter { it.title.contains(query.trim(), ignoreCase = true) }
+        }
+        when (selectedTopTab) {
+            "最近" -> base.sortedByDescending { it.lastReadAt }
+            "分类" -> base.sortedBy { it.title }
+            else -> base
         }
     }
 
-    Column(
+    Box(
         modifier = modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 18.dp, vertical = 18.dp),
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFFEAF4FF),
+                        Color(0xFFF8FBFF),
+                        Color(0xFFFFFFFF),
+                    ),
+                ),
+            ),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("竹简阅读", fontSize = 32.sp, fontWeight = FontWeight.Black)
-                Text("本地 TXT 小说阅读器", color = Color(0xFF777A82), fontSize = 14.sp)
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            label = { Text("搜索书名") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(16.dp))
-
-        Box(
+        Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
         ) {
-            if (filteredBooks.isEmpty()) {
-                EmptyShelf()
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 136.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    contentPadding = PaddingValues(bottom = 16.dp),
-                ) {
-                    gridItems(filteredBooks, key = { it.id }) { book ->
-                        BookCard(book = book, onOpen = onOpen, onDelete = onDelete)
+            ShelfTopGlassBar(
+                selectedTab = selectedTopTab,
+                onSelectTab = {
+                    selectedTopTab = it
+                },
+                onSearch = { showSearch = !showSearch },
+                onMore = { showQuickActions = !showQuickActions },
+            )
+
+            if (showSearch) {
+                Spacer(Modifier.height(10.dp))
+                GlassPanel {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        label = { Text("搜索书名") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            if (showQuickActions || selectedBottomTab == "设置") {
+                Spacer(Modifier.height(10.dp))
+                ShelfActionGlassPanel(
+                    onImport = onImport,
+                    onCloud = onCloud,
+                    onUpdate = onUpdate,
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+                if (filteredBooks.isEmpty()) {
+                    EmptyShelf()
+                } else {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(bottom = 18.dp),
+                    ) {
+                        items(filteredBooks, key = { it.id }) { book ->
+                            BookCard(book = book, onOpen = onOpen, onDelete = onDelete)
+                        }
                     }
                 }
             }
-        }
 
-        ShelfSettingsBar(
-            onImport = onImport,
-            onCloud = onCloud,
-            onUpdate = onUpdate,
-        )
+            ShelfBottomGlassNav(
+                selected = selectedBottomTab,
+                onSelect = { tab ->
+                    selectedBottomTab = tab
+                    showQuickActions = tab == "设置"
+                    if (tab == "书架") selectedTopTab = "全部"
+                },
+            )
+        }
     }
 }
 
@@ -526,40 +568,170 @@ private fun EmptyShelf() {
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("书架还是空的", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-            Text("从底部设置栏导入本地小说。", color = Color(0xFF777A82))
+        GlassPanel(modifier = Modifier.fillMaxWidth()) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("书架还是空的", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color(0xFF0E1726))
+                Text("从右上角更多或底部设置导入本地小说。", color = Color(0xFF6B7890), fontSize = 14.sp)
+            }
         }
     }
 }
 
 @Composable
-private fun ShelfSettingsBar(
+private fun ShelfTopGlassBar(
+    selectedTab: String,
+    onSelectTab: (String) -> Unit,
+    onSearch: () -> Unit,
+    onMore: () -> Unit,
+) {
+    GlassPanel(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf("全部", "分类", "最近").forEach { tab ->
+                    ShelfTabChip(
+                        label = tab,
+                        selected = selectedTab == tab,
+                        onClick = { onSelectTab(tab) },
+                    )
+                }
+            }
+            GlassIconButton(label = "⌕", description = "搜索", onClick = onSearch)
+            Spacer(Modifier.width(8.dp))
+            GlassIconButton(label = "⋮", description = "更多", onClick = onMore)
+        }
+    }
+}
+
+@Composable
+private fun ShelfTabChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier
+            .height(36.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) Color(0xFF1677FF) else Color.Transparent),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+    ) {
+        Text(
+            text = label,
+            color = if (selected) Color.White else Color(0xFF526079),
+            fontSize = 15.sp,
+            fontWeight = if (selected) FontWeight.Black else FontWeight.Bold,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun GlassIconButton(label: String, description: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(Color.White.copy(alpha = 0.58f)),
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        Text(
+            text = label,
+            color = Color(0xFF1677FF),
+            fontSize = if (description == "更多") 24.sp else 22.sp,
+            fontWeight = FontWeight.Black,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun ShelfActionGlassPanel(
     onImport: () -> Unit,
     onCloud: () -> Unit,
     onUpdate: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding(),
-    ) {
-        Divider(color = Color(0xFFE4E5E8))
-        Spacer(Modifier.height(10.dp))
+    GlassPanel {
         Text(
-            text = "设置",
-            color = Color(0xFF777A82),
+            text = "快捷操作",
+            color = Color(0xFF526079),
             fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.Black,
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             ShelfActionButton(label = "导入", onClick = onImport, modifier = Modifier.weight(1f))
             ShelfActionButton(label = "云同步", onClick = onCloud, modifier = Modifier.weight(1f))
-            ShelfActionButton(label = "更新", onClick = onUpdate, modifier = Modifier.weight(1f))
+            ShelfActionButton(label = "检查更新", onClick = onUpdate, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun ShelfBottomGlassNav(selected: String, onSelect: (String) -> Unit) {
+    GlassPanel(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(bottom = 8.dp),
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            listOf(
+                "书架" to "▥",
+                "内置浏览器" to "◎",
+                "书签" to "◇",
+                "设置" to "◌",
+            ).forEach { (label, icon) ->
+                ShelfNavItem(
+                    label = label,
+                    icon = icon,
+                    selected = selected == label,
+                    onClick = { onSelect(label) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShelfNavItem(label: String, icon: String, selected: Boolean, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = Modifier
+            .height(58.dp)
+            .width(86.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(if (selected) Color(0x221677FF) else Color.Transparent),
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = icon,
+                color = if (selected) Color(0xFF1677FF) else Color(0xFF7D8AA3),
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Black,
+            )
+            Text(
+                text = label,
+                color = if (selected) Color(0xFF1677FF) else Color(0xFF7D8AA3),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
     }
 }
@@ -573,18 +745,35 @@ private fun ShelfActionButton(
     OutlinedButton(
         onClick = onClick,
         modifier = modifier
-            .height(46.dp)
-            .defaultMinSize(minWidth = 1.dp, minHeight = 46.dp),
+            .height(42.dp)
+            .defaultMinSize(minWidth = 1.dp, minHeight = 42.dp),
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
     ) {
         Text(
             text = label,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            fontSize = 14.sp,
+            fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
+            color = Color(0xFF1677FF),
         )
     }
+}
+
+@Composable
+private fun GlassPanel(
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(14.dp),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(24.dp))
+            .background(Color.White.copy(alpha = 0.68f))
+            .border(1.dp, Color.White.copy(alpha = 0.86f), RoundedCornerShape(24.dp))
+            .padding(contentPadding),
+        content = content,
+    )
 }
 
 @Composable
@@ -709,16 +898,10 @@ private fun UpdateSettingsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Text(
-                    text = "更新源：GitHub Releases / $DefaultGithubOwner/$DefaultGithubRepo",
+                    text = "@我的 GitHub 仓库",
                     color = Color(0xFF777A82),
                     fontSize = 13.sp,
                     lineHeight = 18.sp,
-                )
-                Text(
-                    text = "发布新版时，只要在 GitHub 仓库创建新的 Release 并上传 APK，用户点击检查更新就能看到更新内容和下载入口。",
-                    color = Color(0xFF777A82),
-                    fontSize = 12.sp,
-                    lineHeight = 17.sp,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -869,30 +1052,41 @@ private fun BookCard(book: Book, onOpen: (Book) -> Unit, onDelete: (Book) -> Uni
     )
     val coverColor = coverColors[book.title.hashCode().ushr(1) % coverColors.size]
 
-    Card(
+    GlassPanel(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onOpen(book) },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(12.dp),
     ) {
-        Column(Modifier.padding(10.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(0.68f)
-                    .background(coverColor, RoundedCornerShape(6.dp))
-                    .border(1.dp, Color(0x24FFFFFF), RoundedCornerShape(6.dp))
-                    .padding(12.dp),
+                    .width(72.dp)
+                    .height(104.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                coverColor.copy(alpha = 0.92f),
+                                coverColor,
+                                Color(0xFF0B1220),
+                            ),
+                        ),
+                    )
+                    .border(1.dp, Color(0x44FFFFFF), RoundedCornerShape(12.dp))
+                    .padding(8.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = book.title,
                     color = Color.White,
-                    fontSize = 20.sp,
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.Black,
-                    lineHeight = 26.sp,
+                    lineHeight = 19.sp,
                     textAlign = TextAlign.Center,
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
@@ -900,7 +1094,7 @@ private fun BookCard(book: Book, onOpen: (Book) -> Unit, onDelete: (Book) -> Uni
                 Text(
                     text = "TXT",
                     color = Color(0xCCFFFFFF),
-                    fontSize = 11.sp,
+                    fontSize = 10.sp,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
@@ -908,52 +1102,69 @@ private fun BookCard(book: Book, onOpen: (Book) -> Unit, onDelete: (Book) -> Uni
                         .padding(horizontal = 7.dp, vertical = 3.dp),
                 )
             }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = book.title,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                lineHeight = 21.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = currentTitle,
-                color = Color(0xFFE5484D),
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = "${book.chapterCount} 章 · ${formatTime(book.lastReadAt)}",
-                color = Color(0xFF777A82),
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.height(9.dp))
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFFE5484D),
-                trackColor = Color(0xFFE4E5E8),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+
+            Column(Modifier.weight(1f)) {
                 Text(
-                    text = "$readPercent%",
-                    color = Color(0xFFE5484D),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
+                    text = book.title,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Color(0xFF0E1726),
+                    lineHeight = 23.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                TextButton(onClick = { onDelete(book) }) {
-                    Text("删除")
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    text = currentTitle,
+                    color = Color(0xFF1677FF),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "${book.chapterCount} 章 · ${formatTime(book.lastReadAt)}",
+                    color = Color(0xFF7D8AA3),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = Color(0xFF1677FF),
+                    trackColor = Color(0xFFDCEBFF),
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "已读 $readPercent%",
+                        color = Color(0xFF1677FF),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black,
+                    )
+                    TextButton(
+                        onClick = { onDelete(book) },
+                        modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 30.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text("删除", color = Color(0xFF7D8AA3), fontSize = 12.sp)
+                    }
                 }
             }
+
+            Text(
+                text = "›",
+                color = Color(0xFF9AA8BE),
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Black,
+            )
         }
     }
 }
