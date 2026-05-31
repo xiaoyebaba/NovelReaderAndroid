@@ -30,8 +30,10 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -188,6 +190,14 @@ data class SearchResult(
     val paragraphIndex: Int,
     val chapterTitle: String,
     val preview: String,
+)
+
+private data class ScrollReadItem(
+    val chapterIndex: Int,
+    val paragraphIndex: Int,
+    val title: String,
+    val text: String,
+    val isTitle: Boolean,
 )
 
 data class UpdateInfo(
@@ -793,18 +803,24 @@ private fun ReaderScreen(
     val scope = rememberCoroutineScope()
     val chapter = chapters[chapterIndex]
     val paragraphs = remember(book.id, chapterIndex) { chapter.toParagraphs() }
+    val scrollItems = remember(book.id, chapters) { chapters.toScrollReadItems() }
+    fun scrollIndexFor(targetChapter: Int, targetParagraph: Int = -1): Int {
+        val target = scrollItems.indexOfFirst {
+            it.chapterIndex == targetChapter && it.paragraphIndex == targetParagraph
+        }
+        if (target >= 0) return target
+        return scrollItems.indexOfFirst { it.chapterIndex == targetChapter }.coerceAtLeast(0)
+    }
     val pages = remember(book.id, chapterIndex, prefs.fontSize, prefs.pageMode) {
         chapter.toPages(charsPerPage = pageSizeFor(prefs.fontSize))
     }
     var pageIndex by remember(book.id, chapterIndex, prefs.pageMode) {
         mutableIntStateOf(0)
     }
-    val initialParagraph = if (chapterIndex == book.currentChapter) {
-        book.paragraphIndex.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
-    } else {
-        0
+    val initialScrollItem = remember(book.id, scrollItems) {
+        scrollIndexFor(book.currentChapter.coerceIn(0, chapters.lastIndex), book.paragraphIndex)
     }
-    val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialParagraph)
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialScrollItem)
     val colors = readerColors(prefs.theme)
     val customBackground = remember(prefs.customBackgroundPath) {
         prefs.customBackgroundPath
@@ -856,26 +872,30 @@ private fun ReaderScreen(
         }
     }
 
-    LaunchedEffect(chapterIndex, pendingScrollItem) {
+    LaunchedEffect(chapterIndex, pendingScrollItem, prefs.pageMode) {
         val target = pendingScrollItem
-        if (target != null) {
+        if (prefs.pageMode == "scroll" && target != null) {
             listState.scrollToItem(target)
             pendingScrollItem = null
-        } else if (chapterIndex != book.currentChapter) {
-            listState.scrollToItem(0)
         }
     }
 
-    LaunchedEffect(book.id, chapterIndex, listState) {
+    LaunchedEffect(book.id, listState, scrollItems, prefs.pageMode) {
+        if (prefs.pageMode != "scroll") return@LaunchedEffect
         snapshotFlow { listState.firstVisibleItemIndex }
             .distinctUntilChanged()
-            .collect { paragraph ->
+            .collect { index ->
+                val visible = scrollItems.getOrNull(index) ?: return@collect
+                val nextParagraph = visible.paragraphIndex.coerceAtLeast(0)
+                if (chapterIndex != visible.chapterIndex) {
+                    chapterIndex = visible.chapterIndex
+                }
                 onUpdateBook(
                     book.copy(
                         chapterCount = chapters.size,
-                        currentChapter = chapterIndex,
-                        paragraphIndex = paragraph,
-                        currentChapterTitle = chapter.title,
+                        currentChapter = visible.chapterIndex,
+                        paragraphIndex = nextParagraph,
+                        currentChapterTitle = visible.title,
                         lastReadAt = System.currentTimeMillis(),
                     ),
                 )
@@ -921,31 +941,32 @@ private fun ReaderScreen(
                     }
                     .padding(horizontal = 22.dp),
             ) {
-                item {
-                    Spacer(Modifier.height(if (showChrome) 14.dp else 0.dp))
-                    Text(
-                        text = chapter.title,
-                        color = colors.text,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        lineHeight = 24.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        fontFamily = customFont,
-                    )
-                    Spacer(Modifier.height(16.dp))
+                itemsIndexed(scrollItems) { index, item ->
+                    if (item.isTitle) {
+                        Spacer(Modifier.height(if (index == 0 && !showChrome) 0.dp else 18.dp))
+                        Text(
+                            text = item.title,
+                            color = colors.text,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            lineHeight = 24.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            fontFamily = customFont,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                    } else {
+                        Text(
+                            text = item.text,
+                            color = colors.text,
+                            fontSize = prefs.fontSize.sp,
+                            lineHeight = (prefs.fontSize * prefs.lineHeight).sp,
+                            fontFamily = customFont,
+                            modifier = Modifier.padding(bottom = 14.dp),
+                        )
+                    }
                 }
-                items(paragraphs) { paragraph ->
-                    Text(
-                        text = paragraph,
-                        color = colors.text,
-                        fontSize = prefs.fontSize.sp,
-                        lineHeight = (prefs.fontSize * prefs.lineHeight).sp,
-                        fontFamily = customFont,
-                        modifier = Modifier.padding(bottom = 14.dp),
-                    )
-                }
-                item { Spacer(Modifier.height(126.dp)) }
+                item { Spacer(Modifier.height(44.dp)) }
             }
         } else {
             PagedReaderContent(
@@ -1024,7 +1045,7 @@ private fun ReaderScreen(
                 onPrevious = {
                 val nextChapter = (chapterIndex - 1).coerceAtLeast(0)
                 chapterIndex = nextChapter
-                pendingScrollItem = 0
+                pendingScrollItem = scrollIndexFor(nextChapter)
                 onUpdateBook(
                     book.copy(
                         currentChapter = nextChapter,
@@ -1037,7 +1058,7 @@ private fun ReaderScreen(
                 onNext = {
                 val nextChapter = (chapterIndex + 1).coerceAtMost(chapters.lastIndex)
                 chapterIndex = nextChapter
-                pendingScrollItem = 0
+                pendingScrollItem = scrollIndexFor(nextChapter)
                 onUpdateBook(
                     book.copy(
                         currentChapter = nextChapter,
@@ -1063,7 +1084,9 @@ private fun ReaderScreen(
                 chapter = chapter.title,
                 current = chapterIndex,
                 total = chapters.size,
-                pageIndex = if (prefs.pageMode == "scroll") listState.firstVisibleItemIndex else pageIndex,
+                pageIndex = if (prefs.pageMode == "scroll") {
+                    scrollItems.getOrNull(listState.firstVisibleItemIndex)?.paragraphIndex?.coerceAtLeast(0) ?: 0
+                } else pageIndex,
                 pageTotal = if (prefs.pageMode == "scroll") paragraphs.size.coerceAtLeast(1) else pages.size.coerceAtLeast(1),
                 colors = colors,
             )
@@ -1100,7 +1123,7 @@ private fun ReaderScreen(
             onDismiss = { showCatalog = false },
             onOpenChapter = { nextChapter ->
                 chapterIndex = nextChapter
-                pendingScrollItem = 0
+                pendingScrollItem = scrollIndexFor(nextChapter)
                 onUpdateBook(
                     book.copy(
                         currentChapter = nextChapter,
@@ -1120,11 +1143,11 @@ private fun ReaderScreen(
             onDismiss = { showSearch = false },
             onOpenResult = { result ->
                 chapterIndex = result.chapterIndex
-                pendingScrollItem = result.paragraphIndex + 1
+                pendingScrollItem = scrollIndexFor(result.chapterIndex, result.paragraphIndex)
                 onUpdateBook(
                     book.copy(
                         currentChapter = result.chapterIndex,
-                        paragraphIndex = result.paragraphIndex + 1,
+                        paragraphIndex = result.paragraphIndex,
                         currentChapterTitle = result.chapterTitle,
                         lastReadAt = System.currentTimeMillis(),
                     ),
@@ -1156,7 +1179,7 @@ private fun ReaderMiniStatusBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .padding(horizontal = 22.dp, vertical = 10.dp),
+                .padding(horizontal = 18.dp, vertical = 7.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1273,12 +1296,10 @@ private fun ReaderTopBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(colors.toolbar)
-            .padding(horizontal = 10.dp, vertical = 10.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(onClick = onBack) {
-            Text("书架", color = colors.toolbarText)
-        }
+        CompactTextButton(label = "书架", color = colors.toolbarText, onClick = onBack)
         Column(Modifier.weight(1f)) {
             Text(
                 text = title,
@@ -1286,6 +1307,7 @@ private fun ReaderTopBar(
                 overflow = TextOverflow.Ellipsis,
                 fontWeight = FontWeight.Bold,
                 color = colors.toolbarText,
+                fontSize = 15.sp,
             )
             Text(
                 text = chapter,
@@ -1295,15 +1317,32 @@ private fun ReaderTopBar(
                 fontSize = 12.sp,
             )
         }
-        TextButton(onClick = onCatalog) {
-            Text("目录", color = colors.toolbarText)
-        }
-        TextButton(onClick = onSearch) {
-            Text("搜索", color = colors.toolbarText)
-        }
-        TextButton(onClick = onSettings) {
-            Text("设置", color = colors.toolbarText)
-        }
+        CompactTextButton(label = "目录", color = colors.toolbarText, onClick = onCatalog)
+        CompactTextButton(label = "搜索", color = colors.toolbarText, onClick = onSearch)
+        CompactTextButton(label = "设置", color = colors.toolbarText, onClick = onSettings)
+    }
+}
+
+@Composable
+private fun CompactTextButton(
+    label: String,
+    color: Color,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+) {
+    TextButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 34.dp),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+    ) {
+        Text(
+            text = label,
+            color = if (enabled) color else color.copy(alpha = 0.38f),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+        )
     }
 }
 
@@ -1445,48 +1484,56 @@ private fun ReaderBottomBar(
             .fillMaxWidth()
             .background(colors.chrome)
             .navigationBarsPadding()
-            .padding(horizontal = 18.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 4.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            TextButton(onClick = onPrevious, enabled = current > 0) {
-                Text("上一章")
-            }
+            BottomActionText("上一章", colors.secondaryText, current > 0, onPrevious)
             LinearProgressIndicator(
                 progress = { progress },
                 modifier = Modifier.weight(1f),
                 color = colors.accent,
                 trackColor = colors.divider,
             )
-            TextButton(onClick = onNext, enabled = current < total - 1) {
-                Text("下一章")
-            }
+            BottomActionText("下一章", colors.secondaryText, current < total - 1, onNext)
         }
-        Text(
-            text = "${current + 1} / $total",
-            color = colors.secondaryText,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.align(Alignment.CenterHorizontally),
-        )
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onCatalog) {
-                Text("目录", color = colors.secondaryText, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
-            TextButton(onClick = onSearch) {
-                Text("搜索", color = colors.secondaryText, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
-            TextButton(onClick = onSettings) {
-                Text("界面", color = colors.secondaryText, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
+            Text(
+                text = "${current + 1}/$total",
+                color = colors.secondaryText,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            BottomActionText("目录", colors.secondaryText, true, onCatalog)
+            BottomActionText("搜索", colors.secondaryText, true, onSearch)
+            BottomActionText("界面", colors.secondaryText, true, onSettings)
         }
     }
+}
+
+@Composable
+private fun BottomActionText(
+    label: String,
+    color: Color,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = label,
+        color = if (enabled) color else color.copy(alpha = 0.38f),
+        fontSize = 14.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+    )
 }
 
 @Composable
@@ -2026,6 +2073,32 @@ private fun Chapter.toParagraphs(): List<String> {
         .filter { it.isNotBlank() }
     if (lines.size > 1) return lines
     return body.chunked(420).map { it.trim() }.filter { it.isNotBlank() }
+}
+
+private fun List<Chapter>.toScrollReadItems(): List<ScrollReadItem> = flatMapIndexed { chapterIndex, chapter ->
+    val paragraphs = chapter.toParagraphs()
+    buildList {
+        add(
+            ScrollReadItem(
+                chapterIndex = chapterIndex,
+                paragraphIndex = -1,
+                title = chapter.title,
+                text = chapter.title,
+                isTitle = true,
+            ),
+        )
+        paragraphs.forEachIndexed { paragraphIndex, paragraph ->
+            add(
+                ScrollReadItem(
+                    chapterIndex = chapterIndex,
+                    paragraphIndex = paragraphIndex,
+                    title = chapter.title,
+                    text = paragraph,
+                    isTitle = false,
+                ),
+            )
+        }
+    }
 }
 
 private fun Chapter.toPages(charsPerPage: Int): List<String> {
