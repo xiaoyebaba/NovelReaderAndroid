@@ -207,6 +207,7 @@ data class BrowserPrefs(
     val searchEngine: String = "百度",
     val customSearchUrl: String = "https://www.baidu.com/s?wd={query}",
     val sourceName: String = "通用正文",
+    val sourceSearchUrl: String = "https://www.baidu.com/s?wd={query}",
     val titleSelector: String = "",
     val contentSelector: String = "",
 )
@@ -890,6 +891,7 @@ private fun BrowserPanel(
     var showSourceAdapter by remember { mutableStateOf(false) }
     var customSearchUrl by remember(prefs.customSearchUrl) { mutableStateOf(prefs.customSearchUrl) }
     var sourceName by remember(prefs.sourceName) { mutableStateOf(prefs.sourceName) }
+    var sourceSearchUrl by remember(prefs.sourceSearchUrl) { mutableStateOf(prefs.sourceSearchUrl) }
     var titleSelector by remember(prefs.titleSelector) { mutableStateOf(prefs.titleSelector) }
     var contentSelector by remember(prefs.contentSelector) { mutableStateOf(prefs.contentSelector) }
 
@@ -908,10 +910,21 @@ private fun BrowserPanel(
                 searchEngine = nextEngine,
                 customSearchUrl = customSearchUrl.trim().ifBlank { "https://www.baidu.com/s?wd={query}" },
                 sourceName = sourceName.trim().ifBlank { "通用正文" },
+                sourceSearchUrl = sourceSearchUrl.trim().ifBlank { "https://www.baidu.com/s?wd={query}" },
                 titleSelector = titleSelector.trim(),
                 contentSelector = contentSelector.trim(),
             ),
         )
+    }
+
+    fun loadSourceSearch() {
+        saveBrowserSettings()
+        val encoded = URLEncoder.encode(address.trim().ifBlank { "小说" }, "UTF-8")
+        val target = sourceSearchUrl
+            .trim()
+            .ifBlank { "https://www.baidu.com/s?wd={query}" }
+            .replace("{query}", encoded)
+        webView?.loadUrl(target)
     }
 
     fun importCurrentPage() {
@@ -981,8 +994,17 @@ private fun BrowserPanel(
                 OutlinedButton(onClick = ::importCurrentPage) {
                     Text("加入书架")
                 }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 OutlinedButton(onClick = { showSourceAdapter = !showSourceAdapter }) {
                     Text("书源适配")
+                }
+                OutlinedButton(onClick = ::loadSourceSearch) {
+                    Text("书源搜索")
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -1014,6 +1036,14 @@ private fun BrowserPanel(
                     value = sourceName,
                     onValueChange = { sourceName = it },
                     label = { Text("书源名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = sourceSearchUrl,
+                    onValueChange = { sourceSearchUrl = it },
+                    label = { Text("搜索地址，使用 {query} 代表关键词") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -2613,6 +2643,8 @@ class NovelRepository(private val context: Context) {
         customSearchUrl = browserPrefs.getString("custom_search_url", "https://www.baidu.com/s?wd={query}")
             ?: "https://www.baidu.com/s?wd={query}",
         sourceName = browserPrefs.getString("source_name", "通用正文") ?: "通用正文",
+        sourceSearchUrl = browserPrefs.getString("source_search_url", "https://www.baidu.com/s?wd={query}")
+            ?: "https://www.baidu.com/s?wd={query}",
         titleSelector = browserPrefs.getString("title_selector", "") ?: "",
         contentSelector = browserPrefs.getString("content_selector", "") ?: "",
     )
@@ -2622,6 +2654,7 @@ class NovelRepository(private val context: Context) {
             .putString("search_engine", prefs.searchEngine)
             .putString("custom_search_url", prefs.customSearchUrl)
             .putString("source_name", prefs.sourceName)
+            .putString("source_search_url", prefs.sourceSearchUrl)
             .putString("title_selector", prefs.titleSelector)
             .putString("content_selector", prefs.contentSelector)
             .apply()
