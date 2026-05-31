@@ -6,6 +6,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Base64
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.graphics.BitmapFactory
 import android.graphics.Typeface as AndroidTypeface
 import androidx.activity.compose.BackHandler
@@ -92,6 +95,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -102,6 +106,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
@@ -164,6 +169,17 @@ data class Book(
     val currentChapterTitle: String = "",
     val createdAt: Long,
     val lastReadAt: Long,
+)
+
+data class Bookmark(
+    val id: String,
+    val bookId: String,
+    val bookTitle: String,
+    val chapterIndex: Int,
+    val paragraphIndex: Int,
+    val chapterTitle: String,
+    val preview: String,
+    val createdAt: Long,
 )
 
 data class ReaderPrefs(
@@ -258,6 +274,7 @@ private fun NovelReaderApp(
     onOpenUrl: (String) -> Unit,
 ) {
     var books by remember { mutableStateOf(repository.loadBooks()) }
+    var bookmarks by remember { mutableStateOf(repository.loadBookmarks()) }
     var prefs by remember { mutableStateOf(repository.loadReaderPrefs()) }
     var syncPrefs by remember { mutableStateOf(repository.loadSyncPrefs()) }
     var activeBookId by remember { mutableStateOf<String?>(null) }
@@ -289,6 +306,24 @@ private fun NovelReaderApp(
                 snackbars.showSnackbar("已导入《${book.title}》，识别到 ${book.chapterCount} 章")
             }.onFailure {
                 snackbars.showSnackbar("导入失败：${it.message ?: "无法读取文件"}")
+            }
+        }
+    }
+
+    fun importWebPage(title: String, text: String) {
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.importWebText(title, text)
+                }
+            }.onSuccess { book ->
+                val nextBooks = (listOf(book) + books).distinctBy { it.id }
+                books = nextBooks
+                repository.saveBooks(nextBooks)
+                activeBookId = book.id
+                snackbars.showSnackbar("已加入书架：《${book.title}》")
+            }.onFailure {
+                snackbars.showSnackbar("加入书架失败：${it.message ?: "无法读取网页正文"}")
             }
         }
     }
@@ -356,14 +391,37 @@ private fun NovelReaderApp(
         if (activeBook == null) {
             BookshelfScreen(
                 books = books,
+                bookmarks = bookmarks,
                 onImport = { importLauncher.launch(arrayOf("text/plain", "application/octet-stream", "*/*")) },
                 onCloud = { showCloudDialog = true },
                 onUpdate = { showUpdateDialog = true },
+                onImportWebPage = ::importWebPage,
                 onOpen = { activeBookId = it.id },
+                onOpenBookmark = { bookmark ->
+                    val target = books.firstOrNull { it.id == bookmark.bookId }
+                    if (target == null) {
+                        scope.launch { snackbars.showSnackbar("书签对应的书籍已不存在") }
+                    } else {
+                        val updated = target.copy(
+                            currentChapter = bookmark.chapterIndex,
+                            paragraphIndex = bookmark.paragraphIndex,
+                            currentChapterTitle = bookmark.chapterTitle,
+                            lastReadAt = System.currentTimeMillis(),
+                        )
+                        replaceBook(updated)
+                        activeBookId = updated.id
+                    }
+                },
+                onDeleteBookmark = { bookmark ->
+                    bookmarks = bookmarks.filterNot { it.id == bookmark.id }
+                    repository.saveBookmarks(bookmarks)
+                },
                 onDelete = { book ->
                     repository.deleteBook(book)
                     books = books.filterNot { it.id == book.id }
+                    bookmarks = bookmarks.filterNot { it.bookId == book.id }
                     repository.saveBooks(books)
+                    repository.saveBookmarks(bookmarks)
                 },
                 modifier = Modifier.padding(innerPadding),
             )
@@ -377,6 +435,11 @@ private fun NovelReaderApp(
                 onUpdatePrefs = {
                     prefs = it
                     repository.saveReaderPrefs(it)
+                },
+                onAddBookmark = { bookmark ->
+                    bookmarks = (listOf(bookmark) + bookmarks).distinctBy { it.id }
+                    repository.saveBookmarks(bookmarks)
+                    scope.launch { snackbars.showSnackbar("书签已添加") }
                 },
                 modifier = Modifier.padding(innerPadding),
             )
@@ -456,10 +519,14 @@ private fun NovelReaderApp(
 @Composable
 private fun BookshelfScreen(
     books: List<Book>,
+    bookmarks: List<Bookmark>,
     onImport: () -> Unit,
     onCloud: () -> Unit,
     onUpdate: () -> Unit,
+    onImportWebPage: (String, String) -> Unit,
     onOpen: (Book) -> Unit,
+    onOpenBookmark: (Bookmark) -> Unit,
+    onDeleteBookmark: (Bookmark) -> Unit,
     onDelete: (Book) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -536,15 +603,25 @@ private fun BookshelfScreen(
                     .weight(1f)
                     .fillMaxWidth(),
             ) {
-                if (filteredBooks.isEmpty()) {
-                    EmptyShelf()
-                } else {
-                    LazyColumn(
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                        contentPadding = PaddingValues(bottom = 18.dp),
-                    ) {
-                        items(filteredBooks, key = { it.id }) { book ->
-                            BookCard(book = book, onOpen = onOpen, onDelete = onDelete)
+                when (selectedBottomTab) {
+                    "内置浏览器" -> BrowserPanel(onImportWebPage = onImportWebPage)
+                    "书签" -> BookmarkPanel(
+                        bookmarks = bookmarks,
+                        onOpenBookmark = onOpenBookmark,
+                        onDeleteBookmark = onDeleteBookmark,
+                    )
+                    else -> {
+                        if (filteredBooks.isEmpty()) {
+                            EmptyShelf()
+                        } else {
+                            LazyColumn(
+                                verticalArrangement = Arrangement.spacedBy(12.dp),
+                                contentPadding = PaddingValues(bottom = 18.dp),
+                            ) {
+                                items(filteredBooks, key = { it.id }) { book ->
+                                    BookCard(book = book, onOpen = onOpen, onDelete = onDelete)
+                                }
+                            }
                         }
                     }
                 }
@@ -713,26 +790,19 @@ private fun ShelfNavItem(label: String, icon: String, selected: Boolean, onClick
     TextButton(
         onClick = onClick,
         modifier = Modifier
-            .height(58.dp)
-            .width(86.dp)
+            .height(50.dp)
+            .width(64.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(if (selected) Color(0x221677FF) else Color.Transparent),
         contentPadding = PaddingValues(0.dp),
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = icon,
-                color = if (selected) Color(0xFF1677FF) else Color(0xFF7D8AA3),
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Black,
-            )
-            Text(
-                text = label,
-                color = if (selected) Color(0xFF1677FF) else Color(0xFF7D8AA3),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
+        Text(
+            text = icon,
+            color = if (selected) Color(0xFF1677FF) else Color(0xFF7D8AA3),
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Black,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 
@@ -774,6 +844,168 @@ private fun GlassPanel(
             .padding(contentPadding),
         content = content,
     )
+}
+
+@Composable
+private fun BrowserPanel(onImportWebPage: (String, String) -> Unit) {
+    var address by remember { mutableStateOf("https://www.baidu.com") }
+    var pageTitle by remember { mutableStateOf("内置浏览器") }
+    var webView by remember { mutableStateOf<WebView?>(null) }
+
+    fun loadTarget() {
+        webView?.loadUrl(normalizeBrowserInput(address))
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        GlassPanel(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(12.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = address,
+                    onValueChange = { address = it },
+                    label = { Text("搜索或输入网址") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                Button(onClick = ::loadTarget) {
+                    Text("前往")
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    webView?.evaluateJavascript(
+                        """
+                        (function(){
+                            return (document.title || '') + '\n\n' + (document.body ? document.body.innerText : '');
+                        })();
+                        """.trimIndent(),
+                    ) { encoded ->
+                        val extracted = runCatching {
+                            JSONObject("{\"value\":$encoded}").optString("value", "")
+                        }.getOrDefault("")
+                        val title = pageTitle.ifBlank { extracted.lineSequence().firstOrNull().orEmpty() }
+                        onImportWebPage(title, extracted)
+                    }
+                }) {
+                    Text("加入书架")
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        GlassPanel(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(0.dp),
+        ) {
+            AndroidView(
+                factory = { context ->
+                    WebView(context).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.loadWithOverviewMode = true
+                        settings.useWideViewPort = true
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(view: WebView, url: String) {
+                                address = url
+                                pageTitle = view.title.orEmpty()
+                            }
+                        }
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onReceivedTitle(view: WebView, title: String?) {
+                                pageTitle = title.orEmpty()
+                            }
+                        }
+                        loadUrl(address)
+                        webView = this
+                    }
+                },
+                update = { webView = it },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun BookmarkPanel(
+    bookmarks: List<Bookmark>,
+    onOpenBookmark: (Bookmark) -> Unit,
+    onDeleteBookmark: (Bookmark) -> Unit,
+) {
+    if (bookmarks.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            GlassPanel(modifier = Modifier.fillMaxWidth()) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("暂无书签", fontSize = 24.sp, fontWeight = FontWeight.Black, color = Color(0xFF0E1726))
+                    Text("阅读小说时可在工具栏添加书签。", color = Color(0xFF6B7890), fontSize = 14.sp)
+                }
+            }
+        }
+        return
+    }
+
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 18.dp),
+    ) {
+        items(bookmarks, key = { it.id }) { bookmark ->
+            GlassPanel(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenBookmark(bookmark) },
+                contentPadding = PaddingValues(14.dp),
+            ) {
+                Text(
+                    text = bookmark.bookTitle,
+                    color = Color(0xFF0E1726),
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = bookmark.chapterTitle,
+                    color = Color(0xFF1677FF),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = bookmark.preview,
+                    color = Color(0xFF526079),
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = formatTime(bookmark.createdAt),
+                        color = Color(0xFF8A96AA),
+                        fontSize = 12.sp,
+                    )
+                    TextButton(onClick = { onDeleteBookmark(bookmark) }) {
+                        Text("删除", color = Color(0xFF7D8AA3), fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -897,12 +1129,6 @@ private fun UpdateSettingsDialog(
         title = { Text("软件更新") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text(
-                    text = "@我的 GitHub 仓库",
-                    color = Color(0xFF777A82),
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1029,6 +1255,18 @@ private fun formatUpdateNotes(notes: String): List<String> {
                 !line.equals("更新内容：", ignoreCase = true) &&
                 !line.equals("更新内容:", ignoreCase = true)
         }
+}
+
+private fun normalizeBrowserInput(input: String): String {
+    val target = input.trim()
+    if (target.startsWith("http://", ignoreCase = true) || target.startsWith("https://", ignoreCase = true)) {
+        return target
+    }
+    if (target.contains('.') && !target.contains(' ')) {
+        return "https://$target"
+    }
+    val encoded = URLEncoder.encode(target.ifBlank { "小说" }, "UTF-8")
+    return "https://www.baidu.com/s?wd=$encoded"
 }
 
 @Composable
@@ -1177,6 +1415,7 @@ private fun ReaderScreen(
     onBack: () -> Unit,
     onUpdateBook: (Book) -> Unit,
     onUpdatePrefs: (ReaderPrefs) -> Unit,
+    onAddBookmark: (Bookmark) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val text = remember(book.id) { repository.loadBookText(book) }
@@ -1248,6 +1487,32 @@ private fun ReaderScreen(
                 onUpdatePrefs(prefs.copy(customFontPath = path))
             }
         }
+    }
+
+    fun addCurrentBookmark() {
+        val paragraphIndex = if (prefs.pageMode == "scroll") {
+            scrollItems.getOrNull(listState.firstVisibleItemIndex)?.paragraphIndex?.coerceAtLeast(0) ?: 0
+        } else {
+            pageIndex
+        }
+        val preview = if (prefs.pageMode == "scroll") {
+            scrollItems.getOrNull(listState.firstVisibleItemIndex)?.text.orEmpty()
+        } else {
+            pages.getOrNull(pageIndex).orEmpty()
+        }.replace("\n", " ").trim().take(120)
+
+        onAddBookmark(
+            Bookmark(
+                id = UUID.randomUUID().toString(),
+                bookId = book.id,
+                bookTitle = book.title,
+                chapterIndex = chapterIndex,
+                paragraphIndex = paragraphIndex,
+                chapterTitle = chapter.title,
+                preview = preview.ifBlank { chapter.title },
+                createdAt = System.currentTimeMillis(),
+            ),
+        )
     }
 
     BackHandler(enabled = !showSettings && !showCatalog && !showSearch) {
@@ -1355,7 +1620,7 @@ private fun ReaderScreen(
                         )
                     }
                 }
-                item { Spacer(Modifier.height(44.dp)) }
+                item { Spacer(Modifier.height(22.dp)) }
             }
         } else {
             PagedReaderContent(
@@ -1419,6 +1684,7 @@ private fun ReaderScreen(
                 onBack = onBack,
                 onCatalog = { showCatalog = true },
                 onSearch = { showSearch = true },
+                onBookmark = ::addCurrentBookmark,
                 onSettings = { showSettings = true },
             )
         }
@@ -1460,6 +1726,7 @@ private fun ReaderScreen(
                 colors = colors,
                 onCatalog = { showCatalog = true },
                 onSearch = { showSearch = true },
+                onBookmark = ::addCurrentBookmark,
                 onSettings = { showSettings = true },
             )
         }
@@ -1567,8 +1834,7 @@ private fun ReaderMiniStatusBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = 18.dp, vertical = 7.dp),
+                .padding(horizontal = 18.dp, vertical = 5.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1622,7 +1888,7 @@ private fun PagedReaderContent(
             }
             .padding(horizontal = 24.dp, vertical = 24.dp),
     ) {
-        Column(Modifier.padding(bottom = 58.dp)) {
+        Column(Modifier.padding(bottom = 30.dp)) {
             if (showChapterTitle) {
                 Text(
                     text = title,
@@ -1679,6 +1945,7 @@ private fun ReaderTopBar(
     onBack: () -> Unit,
     onCatalog: () -> Unit,
     onSearch: () -> Unit,
+    onBookmark: () -> Unit,
     onSettings: () -> Unit,
 ) {
     Row(
@@ -1708,6 +1975,7 @@ private fun ReaderTopBar(
         }
         CompactTextButton(label = "目录", color = colors.toolbarText, onClick = onCatalog)
         CompactTextButton(label = "搜索", color = colors.toolbarText, onClick = onSearch)
+        CompactTextButton(label = "书签", color = colors.toolbarText, onClick = onBookmark)
         CompactTextButton(label = "设置", color = colors.toolbarText, onClick = onSettings)
     }
 }
@@ -1865,6 +2133,7 @@ private fun ReaderBottomBar(
     colors: ReaderPalette,
     onCatalog: () -> Unit,
     onSearch: () -> Unit,
+    onBookmark: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val progress = ((current + 1).toFloat() / total.coerceAtLeast(1)).coerceIn(0f, 1f)
@@ -1872,8 +2141,7 @@ private fun ReaderBottomBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(colors.chrome)
-            .navigationBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
+            .padding(horizontal = 16.dp, vertical = 2.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1902,6 +2170,7 @@ private fun ReaderBottomBar(
             )
             BottomActionText("目录", colors.secondaryText, true, onCatalog)
             BottomActionText("搜索", colors.secondaryText, true, onSearch)
+            BottomActionText("书签", colors.secondaryText, true, onBookmark)
             BottomActionText("界面", colors.secondaryText, true, onSettings)
         }
     }
@@ -2074,6 +2343,7 @@ private fun readerColors(theme: String): ReaderPalette = when (theme) {
 
 class NovelRepository(private val context: Context) {
     private val libraryPrefs = context.getSharedPreferences("novel_library", Context.MODE_PRIVATE)
+    private val bookmarkPrefs = context.getSharedPreferences("novel_bookmarks", Context.MODE_PRIVATE)
     private val readerPrefs = context.getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
     private val syncPrefs = context.getSharedPreferences("sync_prefs", Context.MODE_PRIVATE)
     private val booksDir: File
@@ -2094,6 +2364,35 @@ class NovelRepository(private val context: Context) {
         return Book(
             id = id,
             title = title,
+            fileName = "$id.txt",
+            chapterCount = chapters.size,
+            currentChapter = 0,
+            paragraphIndex = 0,
+            currentChapterTitle = chapters.firstOrNull()?.title.orEmpty(),
+            createdAt = System.currentTimeMillis(),
+            lastReadAt = System.currentTimeMillis(),
+        )
+    }
+
+    fun importWebText(title: String, rawText: String): Book {
+        val text = rawText
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+            .trim()
+        if (text.length < 120) error("网页正文过短")
+
+        val id = UUID.randomUUID().toString()
+        val safeTitle = title.trim().ifBlank { "网页小说" }.take(60)
+        val chapters = splitChapters(text)
+        File(booksDir, "$id.txt").writeText(text, Charsets.UTF_8)
+
+        return Book(
+            id = id,
+            title = safeTitle,
             fileName = "$id.txt",
             chapterCount = chapters.size,
             currentChapter = 0,
@@ -2125,6 +2424,20 @@ class NovelRepository(private val context: Context) {
         val array = JSONArray()
         books.forEach { array.put(it.toJson()) }
         libraryPrefs.edit().putString("books", array.toString()).apply()
+    }
+
+    fun loadBookmarks(): List<Bookmark> {
+        val raw = bookmarkPrefs.getString("bookmarks", "[]").orEmpty()
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index -> array.getJSONObject(index).toBookmark() }
+        }.getOrDefault(emptyList()).sortedByDescending { it.createdAt }
+    }
+
+    fun saveBookmarks(bookmarks: List<Bookmark>) {
+        val array = JSONArray()
+        bookmarks.forEach { array.put(it.toJson()) }
+        bookmarkPrefs.edit().putString("bookmarks", array.toString()).apply()
     }
 
     fun loadReaderPrefs(): ReaderPrefs = ReaderPrefs(
@@ -2409,6 +2722,27 @@ private fun Book.toJson(): JSONObject = JSONObject()
     .put("currentChapterTitle", currentChapterTitle)
     .put("createdAt", createdAt)
     .put("lastReadAt", lastReadAt)
+
+private fun JSONObject.toBookmark(): Bookmark = Bookmark(
+    id = getString("id"),
+    bookId = getString("bookId"),
+    bookTitle = optString("bookTitle", ""),
+    chapterIndex = optInt("chapterIndex", 0),
+    paragraphIndex = optInt("paragraphIndex", 0),
+    chapterTitle = optString("chapterTitle", ""),
+    preview = optString("preview", ""),
+    createdAt = optLong("createdAt", System.currentTimeMillis()),
+)
+
+private fun Bookmark.toJson(): JSONObject = JSONObject()
+    .put("id", id)
+    .put("bookId", bookId)
+    .put("bookTitle", bookTitle)
+    .put("chapterIndex", chapterIndex)
+    .put("paragraphIndex", paragraphIndex)
+    .put("chapterTitle", chapterTitle)
+    .put("preview", preview)
+    .put("createdAt", createdAt)
 
 private fun splitChapters(raw: String): List<Chapter> {
     val text = raw.replace("\r\n", "\n").replace('\r', '\n')
