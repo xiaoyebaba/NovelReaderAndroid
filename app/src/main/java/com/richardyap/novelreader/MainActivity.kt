@@ -102,6 +102,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
@@ -232,6 +233,18 @@ data class SearchResult(
     val preview: String,
 )
 
+data class SourceSearchResult(
+    val title: String,
+    val author: String,
+    val sourceName: String,
+    val status: String,
+    val latestChapter: String,
+    val intro: String,
+    val bookId: String,
+    val tab: String,
+    val tocUrl: String,
+)
+
 private data class ScrollReadItem(
     val chapterIndex: Int,
     val paragraphIndex: Int,
@@ -344,6 +357,24 @@ private fun NovelReaderApp(
         }
     }
 
+    fun importSourceResult(source: BookSource, result: SourceSearchResult) {
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.importFromSource(source, result)
+                }
+            }.onSuccess { book ->
+                val nextBooks = (listOf(book) + books).distinctBy { it.id }
+                books = nextBooks
+                repository.saveBooks(nextBooks)
+                activeBookId = book.id
+                snackbars.showSnackbar("已从书源加入《${book.title}》")
+            }.onFailure {
+                snackbars.showSnackbar("书源导入失败：${it.message ?: "无法读取正文"}")
+            }
+        }
+    }
+
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
@@ -413,6 +444,7 @@ private fun NovelReaderApp(
     Scaffold(snackbarHost = { SnackbarHost(snackbars) }) { innerPadding ->
         if (activeBook == null) {
             BookshelfScreen(
+                repository = repository,
                 books = books,
                 bookmarks = bookmarks,
                 bookSources = bookSources,
@@ -420,6 +452,7 @@ private fun NovelReaderApp(
                 onImportSource = { sourceImportLauncher.launch(arrayOf("application/json", "text/json", "text/plain", "*/*")) },
                 onCloud = { showCloudDialog = true },
                 onUpdate = { showUpdateDialog = true },
+                onImportResult = ::importSourceResult,
                 onToggleSource = { source ->
                     bookSources = bookSources.map { if (it.id == source.id) it.copy(enabled = !it.enabled) else it }
                     repository.saveBookSources(bookSources)
@@ -550,6 +583,7 @@ private fun NovelReaderApp(
 
 @Composable
 private fun BookshelfScreen(
+    repository: NovelRepository,
     books: List<Book>,
     bookmarks: List<Bookmark>,
     bookSources: List<BookSource>,
@@ -557,6 +591,7 @@ private fun BookshelfScreen(
     onImportSource: () -> Unit,
     onCloud: () -> Unit,
     onUpdate: () -> Unit,
+    onImportResult: (BookSource, SourceSearchResult) -> Unit,
     onToggleSource: (BookSource) -> Unit,
     onDeleteSource: (BookSource) -> Unit,
     onOpen: (Book) -> Unit,
@@ -643,7 +678,9 @@ private fun BookshelfScreen(
                 when (selectedBottomTab) {
                     "书源" -> BookSourcePanel(
                         sources = bookSources,
+                        repository = repository,
                         onImportSource = onImportSource,
+                        onImportResult = onImportResult,
                         onToggleSource = onToggleSource,
                         onDeleteSource = onDeleteSource,
                     )
@@ -898,10 +935,42 @@ private fun GlassPanel(
 @Composable
 private fun BookSourcePanel(
     sources: List<BookSource>,
+    repository: NovelRepository,
     onImportSource: () -> Unit,
+    onImportResult: (BookSource, SourceSearchResult) -> Unit,
     onToggleSource: (BookSource) -> Unit,
     onDeleteSource: (BookSource) -> Unit,
 ) {
+    var keyword by remember { mutableStateOf("") }
+    var selectedSourceId by remember(sources) { mutableStateOf(sources.firstOrNull { it.enabled }?.id.orEmpty()) }
+    var results by remember { mutableStateOf<List<SourceSearchResult>>(emptyList()) }
+    var status by remember { mutableStateOf("") }
+    val selectedSource = sources.firstOrNull { it.id == selectedSourceId } ?: sources.firstOrNull { it.enabled }
+    val scope = rememberCoroutineScope()
+
+    fun search() {
+        val source = selectedSource ?: return
+        val query = keyword.trim()
+        if (query.isBlank()) {
+            status = "请输入书名"
+            return
+        }
+        status = "正在搜索..."
+        results = emptyList()
+        scope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    repository.searchSource(source, query)
+                }
+            }.onSuccess {
+                results = it
+                status = if (it.isEmpty()) "没有搜索到结果" else "搜索到 ${it.size} 条结果"
+            }.onFailure {
+                status = "搜索失败：${it.message ?: "请检查网络或书源"}"
+            }
+        }
+    }
+
     Column(Modifier.fillMaxSize()) {
         GlassPanel(
             modifier = Modifier.fillMaxWidth(),
@@ -937,10 +1006,56 @@ private fun BookSourcePanel(
             }
             return
         }
+        GlassPanel(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(12.dp),
+        ) {
+            OutlinedTextField(
+                value = keyword,
+                onValueChange = { keyword = it },
+                label = { Text("搜索网络书籍") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                sources.filter { it.enabled }.take(4).forEach { source ->
+                    ThemeButton(source.name.take(6), selectedSource?.id == source.id) {
+                        selectedSourceId = source.id
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = ::search, modifier = Modifier.fillMaxWidth()) {
+                Text("搜索")
+            }
+            if (status.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                Text(status, color = Color(0xFF6B7890), fontSize = 12.sp)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(bottom = 18.dp),
         ) {
+            if (results.isNotEmpty()) {
+                item {
+                    Text("搜索结果", color = Color(0xFF526079), fontSize = 13.sp, fontWeight = FontWeight.Black)
+                }
+                items(results, key = { "${it.sourceName}-${it.bookId}-${it.title}" }) { result ->
+                    SourceResultCard(
+                        result = result,
+                        onImport = {
+                            selectedSource?.let { source -> onImportResult(source, result) }
+                        },
+                    )
+                }
+                item {
+                    Spacer(Modifier.height(8.dp))
+                    Text("已导入书源", color = Color(0xFF526079), fontSize = 13.sp, fontWeight = FontWeight.Black)
+                }
+            }
             items(sources, key = { it.id }) { source ->
                 SourceCard(
                     source = source,
@@ -948,6 +1063,59 @@ private fun BookSourcePanel(
                     onDelete = { onDeleteSource(source) },
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun SourceResultCard(
+    result: SourceSearchResult,
+    onImport: () -> Unit,
+) {
+    GlassPanel(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(14.dp),
+    ) {
+        Text(
+            text = result.title,
+            color = Color(0xFF0E1726),
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Black,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = listOf(result.author, result.sourceName, result.status).filter { it.isNotBlank() }.joinToString(" · "),
+            color = Color(0xFF1677FF),
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (result.latestChapter.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = result.latestChapter,
+                color = Color(0xFF6B7890),
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (result.intro.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = result.intro,
+                color = Color(0xFF526079),
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Button(onClick = onImport, modifier = Modifier.fillMaxWidth()) {
+            Text("加入书架")
         }
     }
 }
@@ -2634,6 +2802,99 @@ class NovelRepository(private val context: Context) {
         File(booksDir, book.fileName).delete()
     }
 
+    fun searchSource(source: BookSource, keyword: String): List<SourceSearchResult> {
+        val baseUrl = source.runtimeBaseUrl()
+        val url = "$baseUrl/search?title=${keyword.urlEncode()}&tab=${"小说".urlEncode()}&source=${"全部".urlEncode()}&page=1&disabled_sources=0"
+        val response = request(url = url, method = "GET", prefs = SyncPrefs())
+        if (response.code !in 200..299) error("服务器返回 ${response.code}")
+
+        val json = JSONObject(response.text)
+        val data = json.optJSONArray("data") ?: JSONArray()
+        return List(data.length()) { index ->
+            val item = data.getJSONObject(index)
+            SourceSearchResult(
+                title = item.optString("book_name").ifBlank { item.optString("name") },
+                author = item.optString("author"),
+                sourceName = item.optString("source"),
+                status = item.optString("status"),
+                latestChapter = item.optString("last_chapter_title"),
+                intro = item.optString("abstract").ifBlank { item.optString("intro") },
+                bookId = item.optString("book_id"),
+                tab = item.optString("tab", "小说"),
+                tocUrl = item.optString("toc_url"),
+            )
+        }.filter { it.title.isNotBlank() && it.bookId.isNotBlank() }
+    }
+
+    fun importFromSource(source: BookSource, result: SourceSearchResult): Book {
+        val baseUrl = source.runtimeBaseUrl()
+        val catalogUrl = "$baseUrl/catalog?book_id=${result.bookId.urlEncode()}" +
+            "&source=${result.sourceName.urlEncode()}&tab=${result.tab.ifBlank { "小说" }.urlEncode()}" +
+            "&variable=${"{\"custom\":\"\"}".urlEncode()}"
+        val catalog = request(
+            url = catalogUrl,
+            method = "POST",
+            prefs = SyncPrefs(),
+            body = """{"html":""}""".toByteArray(Charsets.UTF_8),
+            contentType = "application/json; charset=utf-8",
+        )
+        if (catalog.code !in 200..299) error("目录接口返回 ${catalog.code}")
+
+        val catalogItems = JSONObject(catalog.text).optJSONArray("data") ?: JSONArray()
+        if (catalogItems.length() == 0) error("没有读取到目录")
+
+        val maxChapters = catalogItems.length().coerceAtMost(80)
+        val builder = StringBuilder()
+        for (index in 0 until maxChapters) {
+            val chapter = catalogItems.getJSONObject(index)
+            val title = chapter.optString("title").ifBlank { "第 ${index + 1} 章" }
+            val itemId = chapter.optString("item_id")
+            if (itemId.isBlank()) continue
+            val body = JSONObject()
+                .put("html", "")
+                .put("item_id", itemId)
+                .put("source", chapter.optString("source").ifBlank { result.sourceName })
+                .put("tab", chapter.optString("tab").ifBlank { result.tab.ifBlank { "小说" } })
+                .put("tone_id", "4")
+                .put("variable", "{\"custom\":\"\"}")
+                .put("version", "26.5.17")
+                .toString()
+                .toByteArray(Charsets.UTF_8)
+            val content = request(
+                url = "$baseUrl/content",
+                method = "POST",
+                prefs = SyncPrefs(),
+                body = body,
+                contentType = "application/json; charset=utf-8",
+            )
+            if (content.code !in 200..299) continue
+            val text = JSONObject(content.text).optString("content").trim()
+            if (text.isBlank()) continue
+            builder.appendLine(title)
+            builder.appendLine()
+            builder.appendLine(text)
+            builder.appendLine()
+        }
+
+        val text = builder.toString().trim()
+        if (text.length < 120) error("正文内容过短")
+
+        val id = UUID.randomUUID().toString()
+        val chapters = splitChapters(text)
+        File(booksDir, "$id.txt").writeText(text, Charsets.UTF_8)
+        return Book(
+            id = id,
+            title = result.title.ifBlank { "书源小说" },
+            fileName = "$id.txt",
+            chapterCount = chapters.size,
+            currentChapter = 0,
+            paragraphIndex = 0,
+            currentChapterTitle = chapters.firstOrNull()?.title.orEmpty(),
+            createdAt = System.currentTimeMillis(),
+            lastReadAt = System.currentTimeMillis(),
+        )
+    }
+
     fun loadBooks(): List<Book> {
         val raw = libraryPrefs.getString("books", "[]").orEmpty()
         return runCatching {
@@ -3068,6 +3329,15 @@ private fun BookSource.toJson(): JSONObject = JSONObject()
     .put("hasJsRules", hasJsRules)
     .put("enabled", enabled)
     .put("importedAt", importedAt)
+
+private fun BookSource.runtimeBaseUrl(): String {
+    val hostPattern = Regex("""https?://[A-Za-z0-9.\-]+(?::\d+)?""")
+    return hostPattern.find(jsLib)?.value
+        ?: hostPattern.find(rawJson)?.value
+        ?: "https://v1.gyks.cf"
+}
+
+private fun String.urlEncode(): String = URLEncoder.encode(this, "UTF-8")
 
 private fun splitChapters(raw: String): List<Chapter> {
     val text = raw.replace("\r\n", "\n").replace('\r', '\n')
