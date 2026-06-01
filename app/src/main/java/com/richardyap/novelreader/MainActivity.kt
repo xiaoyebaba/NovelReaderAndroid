@@ -201,9 +201,21 @@ data class SyncPrefs(
 data class BookSource(
     val id: String,
     val name: String,
+    val group: String = "",
+    val comment: String = "",
+    val sourceUrl: String = "",
     val sourceSearchUrl: String = "https://www.baidu.com/s?wd={query}",
     val titleSelector: String = "",
     val contentSelector: String = "",
+    val searchRule: String = "",
+    val bookInfoRule: String = "",
+    val tocRule: String = "",
+    val contentRule: String = "",
+    val exploreRule: String = "",
+    val jsLib: String = "",
+    val rawJson: String = "",
+    val isLegado: Boolean = false,
+    val hasJsRules: Boolean = false,
     val enabled: Boolean = true,
     val importedAt: Long = System.currentTimeMillis(),
 )
@@ -966,7 +978,7 @@ private fun SourceCard(
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = source.sourceSearchUrl.ifBlank { "未配置搜索地址" },
+                    text = source.group.ifBlank { source.sourceUrl.ifBlank { source.sourceSearchUrl.ifBlank { "未配置来源信息" } } },
                     color = Color(0xFF6B7890),
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -976,9 +988,23 @@ private fun SourceCard(
             Switch(checked = source.enabled, onCheckedChange = { onToggle() })
         }
         Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SourceMetaChip("标题 ${source.titleSelector.ifBlank { "默认" }}")
-            SourceMetaChip("正文 ${source.contentSelector.ifBlank { "默认" }}")
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (source.isLegado) SourceMetaChip("Legado")
+            if (source.hasJsRules) SourceMetaChip("JS规则")
+            SourceMetaChip("搜索 ${if (source.searchRule.isNotBlank()) "已配置" else "默认"}")
+        }
+        if (source.comment.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = source.comment.lines().firstOrNull { it.isNotBlank() }.orEmpty(),
+                color = Color(0xFF8A96AA),
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         Spacer(Modifier.height(4.dp))
         Row(
@@ -2972,26 +2998,51 @@ private fun Bookmark.toJson(): JSONObject = JSONObject()
 private fun JSONObject.toBookSource(): BookSource {
     val ruleSearch = optJSONObject("ruleSearch")
     val ruleBookInfo = optJSONObject("ruleBookInfo")
+    val ruleToc = optJSONObject("ruleToc")
+    val ruleContent = optJSONObject("ruleContent")
+    val ruleExplore = optJSONObject("ruleExplore")
+    val sourceUrl = optString("bookSourceUrl").ifBlank { optString("sourceUrl") }
+    val searchUrl = optString("sourceSearchUrl").ifBlank {
+        optString("searchUrl").ifBlank { sourceUrl.ifBlank { "https://www.baidu.com/s?wd={query}" } }
+    }
+    val searchRule = ruleSearch?.toString().orEmpty()
+    val bookInfoRule = ruleBookInfo?.toString().orEmpty()
+    val tocRule = ruleToc?.toString().orEmpty()
+    val contentRule = ruleContent?.toString().orEmpty()
+    val exploreRule = ruleExplore?.toString().orEmpty()
+    val jsLib = optString("jsLib")
+    val raw = toString()
+    val legado = has("bookSourceName") || has("bookSourceUrl") || has("ruleSearch") || has("ruleToc") || has("ruleContent")
+    val hasJs = listOf(searchUrl, searchRule, bookInfoRule, tocRule, contentRule, exploreRule, jsLib, optString("exploreUrl"))
+        .any { it.contains("<js>", ignoreCase = true) || it.contains("@js:", ignoreCase = true) }
     return BookSource(
         id = optString("id").ifBlank {
-            optString("bookSourceUrl").ifBlank { optString("sourceUrl").ifBlank { UUID.randomUUID().toString() } }
+            sourceUrl.ifBlank { UUID.randomUUID().toString() }
         },
         name = optString("name").ifBlank {
             optString("sourceName").ifBlank {
                 optString("bookSourceName").ifBlank { optString("title").ifBlank { "未命名书源" } }
             }
         },
-        sourceSearchUrl = optString("sourceSearchUrl").ifBlank {
-            optString("searchUrl").ifBlank {
-                optString("bookSourceUrl").ifBlank { optString("sourceUrl").ifBlank { "https://www.baidu.com/s?wd={query}" } }
-            }
-        },
+        group = optString("group").ifBlank { optString("bookSourceGroup") },
+        comment = optString("comment").ifBlank { optString("bookSourceComment") },
+        sourceUrl = sourceUrl,
+        sourceSearchUrl = searchUrl,
         titleSelector = optString("titleSelector").ifBlank {
             ruleSearch?.optString("name").orEmpty().ifBlank { ruleBookInfo?.optString("name").orEmpty() }
         },
         contentSelector = optString("contentSelector").ifBlank {
-            optJSONObject("ruleContent")?.optString("content").orEmpty()
+            ruleContent?.optString("content").orEmpty()
         },
+        searchRule = searchRule,
+        bookInfoRule = bookInfoRule,
+        tocRule = tocRule,
+        contentRule = contentRule,
+        exploreRule = exploreRule,
+        jsLib = jsLib,
+        rawJson = raw,
+        isLegado = optBoolean("isLegado", legado),
+        hasJsRules = optBoolean("hasJsRules", hasJs),
         enabled = optBoolean("enabled", optBoolean("enabledExplore", true)),
         importedAt = optLong("importedAt", System.currentTimeMillis()),
     )
@@ -3000,9 +3051,21 @@ private fun JSONObject.toBookSource(): BookSource {
 private fun BookSource.toJson(): JSONObject = JSONObject()
     .put("id", id)
     .put("name", name)
+    .put("group", group)
+    .put("comment", comment)
+    .put("sourceUrl", sourceUrl)
     .put("sourceSearchUrl", sourceSearchUrl)
     .put("titleSelector", titleSelector)
     .put("contentSelector", contentSelector)
+    .put("searchRule", searchRule)
+    .put("bookInfoRule", bookInfoRule)
+    .put("tocRule", tocRule)
+    .put("contentRule", contentRule)
+    .put("exploreRule", exploreRule)
+    .put("jsLib", jsLib)
+    .put("rawJson", rawJson)
+    .put("isLegado", isLegado)
+    .put("hasJsRules", hasJsRules)
     .put("enabled", enabled)
     .put("importedAt", importedAt)
 
