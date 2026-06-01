@@ -2803,9 +2803,10 @@ class NovelRepository(private val context: Context) {
     }
 
     fun searchSource(source: BookSource, keyword: String): List<SourceSearchResult> {
-        val baseUrl = source.runtimeBaseUrl()
-        val url = "$baseUrl/search?title=${keyword.urlEncode()}&tab=${"小说".urlEncode()}&source=${"全部".urlEncode()}&page=1&disabled_sources=0"
-        val response = request(url = url, method = "GET", prefs = SyncPrefs())
+        val response = source.runtimeBaseUrls().firstSuccessful { baseUrl ->
+            val url = "$baseUrl/search?title=${keyword.urlEncode()}&tab=${"小说".urlEncode()}&source=${"全部".urlEncode()}&page=1&disabled_sources=0"
+            request(url = url, method = "GET", prefs = SyncPrefs())
+        }
         if (response.code !in 200..299) error("服务器返回 ${response.code}")
 
         val json = JSONObject(response.text)
@@ -2827,7 +2828,18 @@ class NovelRepository(private val context: Context) {
     }
 
     fun importFromSource(source: BookSource, result: SourceSearchResult): Book {
-        val baseUrl = source.runtimeBaseUrl()
+        val baseUrl = source.runtimeBaseUrls().firstSuccessfulBaseUrl { candidate ->
+            val testUrl = "$candidate/catalog?book_id=${result.bookId.urlEncode()}" +
+                "&source=${result.sourceName.urlEncode()}&tab=${result.tab.ifBlank { "小说" }.urlEncode()}" +
+                "&variable=${"{\"custom\":\"\"}".urlEncode()}"
+            request(
+                url = testUrl,
+                method = "POST",
+                prefs = SyncPrefs(),
+                body = """{"html":""}""".toByteArray(Charsets.UTF_8),
+                contentType = "application/json; charset=utf-8",
+            )
+        }
         val catalogUrl = "$baseUrl/catalog?book_id=${result.bookId.urlEncode()}" +
             "&source=${result.sourceName.urlEncode()}&tab=${result.tab.ifBlank { "小说" }.urlEncode()}" +
             "&variable=${"{\"custom\":\"\"}".urlEncode()}"
@@ -2843,9 +2855,10 @@ class NovelRepository(private val context: Context) {
         val catalogItems = JSONObject(catalog.text).optJSONArray("data") ?: JSONArray()
         if (catalogItems.length() == 0) error("没有读取到目录")
 
-        val maxChapters = catalogItems.length().coerceAtMost(80)
         val builder = StringBuilder()
-        for (index in 0 until maxChapters) {
+        var successCount = 0
+        var failureCount = 0
+        for (index in 0 until catalogItems.length()) {
             val chapter = catalogItems.getJSONObject(index)
             val title = chapter.optString("title").ifBlank { "第 ${index + 1} 章" }
             val itemId = chapter.optString("item_id")
@@ -2867,13 +2880,28 @@ class NovelRepository(private val context: Context) {
                 body = body,
                 contentType = "application/json; charset=utf-8",
             )
-            if (content.code !in 200..299) continue
-            val text = JSONObject(content.text).optString("content").trim()
-            if (text.isBlank()) continue
             builder.appendLine(title)
             builder.appendLine()
-            builder.appendLine(text)
+            if (content.code in 200..299) {
+                val text = JSONObject(content.text).optString("content").trim()
+                if (text.isBlank()) {
+                    failureCount += 1
+                    builder.appendLine("本章正文为空。")
+                } else {
+                    successCount += 1
+                    builder.appendLine(text)
+                }
+            } else {
+                failureCount += 1
+                builder.appendLine("本章加载失败：服务器返回 ${content.code}。")
+            }
             builder.appendLine()
+        }
+        if (successCount == 0) error("没有成功读取到正文")
+        if (failureCount > 0) {
+            builder.appendLine("导入记录")
+            builder.appendLine()
+            builder.appendLine("共有 $failureCount 章加载失败，已保留章节占位。")
         }
 
         val text = builder.toString().trim()
@@ -3330,11 +3358,40 @@ private fun BookSource.toJson(): JSONObject = JSONObject()
     .put("enabled", enabled)
     .put("importedAt", importedAt)
 
-private fun BookSource.runtimeBaseUrl(): String {
+private fun BookSource.runtimeBaseUrls(): List<String> {
     val hostPattern = Regex("""https?://[A-Za-z0-9.\-]+(?::\d+)?""")
-    return hostPattern.find(jsLib)?.value
-        ?: hostPattern.find(rawJson)?.value
-        ?: "https://v1.gyks.cf"
+    return (hostPattern.findAll(jsLib).map { it.value } + hostPattern.findAll(rawJson).map { it.value })
+        .distinct()
+        .toList()
+        .ifEmpty { listOf("https://v1.gyks.cf") }
+}
+
+private fun List<String>.firstSuccessful(requestBlock: (String) -> HttpResponse): HttpResponse {
+    var lastError: Throwable? = null
+    for (baseUrl in this) {
+        runCatching { requestBlock(baseUrl) }
+            .onSuccess { response ->
+                if (response.code in 200..299) return response
+            }
+            .onFailure { lastError = it }
+    }
+    lastError?.let { throw it }
+    error("没有可用线路")
+}
+
+private fun List<String>.firstSuccessfulBaseUrl(requestBlock: (String) -> HttpResponse): String {
+    var lastError: Throwable? = null
+    for (baseUrl in this) {
+        runCatching { requestBlock(baseUrl) }
+            .onSuccess { response ->
+                if (response.code in 200..299 && JSONObject(response.text).optJSONArray("data")?.length() ?: 0 > 0) {
+                    return baseUrl
+                }
+            }
+            .onFailure { lastError = it }
+    }
+    lastError?.let { throw it }
+    error("没有可用线路")
 }
 
 private fun String.urlEncode(): String = URLEncoder.encode(this, "UTF-8")
