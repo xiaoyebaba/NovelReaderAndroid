@@ -12,8 +12,8 @@ android {
         applicationId = "com.richardyap.novelreader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.9.0"
+        versionCode = 22
+        versionName = "0.10.0"
     }
 
     buildTypes {
@@ -50,6 +50,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("org.jsoup:jsoup:1.22.2")
+    implementation("org.mozilla:rhino:1.9.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

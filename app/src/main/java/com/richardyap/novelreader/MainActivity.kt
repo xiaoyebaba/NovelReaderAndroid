@@ -118,16 +118,19 @@ import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private val incomingImportUri = mutableStateOf<Uri?>(null)
+    private lateinit var legadoSourceRepository: LegadoSourceRepository
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val repository = NovelRepository(this)
+        legadoSourceRepository = LegadoSourceRepository(this)
         incomingImportUri.value = intent.importUri()
 
         setContent {
             NovelTheme {
                 NovelReaderApp(
                     repository = repository,
+                    legadoSourceRepository = legadoSourceRepository,
                     incomingImportUri = incomingImportUri.value,
                     onIncomingImportConsumed = { incomingImportUri.value = null },
                     onOpenUrl = { url ->
@@ -142,6 +145,13 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         incomingImportUri.value = intent.importUri()
+    }
+
+    override fun onDestroy() {
+        if (this::legadoSourceRepository.isInitialized) {
+            legadoSourceRepository.close()
+        }
+        super.onDestroy()
     }
 }
 
@@ -271,6 +281,7 @@ private fun NovelTheme(content: @Composable () -> Unit) {
 @Composable
 private fun NovelReaderApp(
     repository: NovelRepository,
+    legadoSourceRepository: LegadoSourceRepository,
     incomingImportUri: Uri?,
     onIncomingImportConsumed: () -> Unit,
     onOpenUrl: (String) -> Unit,
@@ -282,9 +293,11 @@ private fun NovelReaderApp(
     var activeBookId by remember { mutableStateOf<String?>(null) }
     var showCloudDialog by remember { mutableStateOf(false) }
     var showUpdateDialog by remember { mutableStateOf(false) }
+    var showSourceDialog by remember { mutableStateOf(false) }
     var pendingUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
     val snackbars = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    var sourceRefreshTick by remember { mutableIntStateOf(0) }
 
     fun replaceBook(updated: Book) {
         books = books
@@ -371,10 +384,14 @@ private fun NovelReaderApp(
     }
 
     val activeBook = books.firstOrNull { it.id == activeBookId }
+    val sourceRepository = legadoSourceRepository
+    val sources = remember(sourceRefreshTick) { sourceRepository.loadSources() }
     Scaffold(snackbarHost = { SnackbarHost(snackbars) }) { innerPadding ->
         if (activeBook == null) {
             BookshelfScreen(
                 repository = repository,
+                sourceRepository = sourceRepository,
+                sources = sources,
                 books = books,
                 bookmarks = bookmarks,
                 onImport = {
@@ -389,6 +406,7 @@ private fun NovelReaderApp(
                     )
                 },
                 onCloud = { showCloudDialog = true },
+                onSources = { showSourceDialog = true },
                 onUpdate = { showUpdateDialog = true },
                 onOpen = { activeBookId = it.id },
                 onOpenBookmark = { bookmark ->
@@ -497,6 +515,36 @@ private fun NovelReaderApp(
         )
     }
 
+    if (showSourceDialog) {
+        LegadoSourceDialogSheet(
+            sourceRepository = sourceRepository,
+            novelRepository = repository,
+            sources = sources,
+            onDismiss = { showSourceDialog = false },
+            onChanged = {
+                sourceRefreshTick++
+            },
+            onImportBook = { sourceId, bookUrl ->
+                scope.launch {
+                    runCatching {
+                        withContext(Dispatchers.IO) {
+                            sourceRepository.importRemoteBook(sourceId, bookUrl, repository)
+                        }
+                    }.onSuccess { imported ->
+                        val nextBooks = (listOf(imported) + books).distinctBy { it.id }
+                        books = nextBooks
+                        withContext(Dispatchers.IO) { repository.saveBooks(nextBooks) }
+                        activeBookId = imported.id
+                        sourceRefreshTick++
+                        snackbars.showSnackbar("已导入《${imported.title}》")
+                    }.onFailure {
+                        snackbars.showSnackbar("导入失败：${it.message ?: "未知错误"}")
+                    }
+                }
+            },
+        )
+    }
+
     pendingUpdate?.let { update ->
         UpdateAvailableDialog(
             update = update,
@@ -513,10 +561,13 @@ private fun NovelReaderApp(
 @Composable
 private fun BookshelfScreen(
     repository: NovelRepository,
+    sourceRepository: LegadoSourceRepository,
+    sources: List<LegadoSourceRecord>,
     books: List<Book>,
     bookmarks: List<Bookmark>,
     onImport: () -> Unit,
     onCloud: () -> Unit,
+    onSources: () -> Unit,
     onUpdate: () -> Unit,
     onOpen: (Book) -> Unit,
     onOpenBookmark: (Bookmark) -> Unit,
@@ -527,6 +578,7 @@ private fun BookshelfScreen(
     var query by remember { mutableStateOf("") }
     var showSearch by remember { mutableStateOf(false) }
     var showQuickActions by remember { mutableStateOf(false) }
+    var showSourceDialog by remember { mutableStateOf(false) }
     var selectedTopTab by remember { mutableStateOf("全部") }
     var selectedBottomTab by remember { mutableStateOf("书架") }
     val filteredBooks = remember(books, query, selectedTopTab) {
@@ -585,9 +637,10 @@ private fun BookshelfScreen(
 
                 if (showQuickActions) {
                     Spacer(Modifier.height(10.dp))
-                    ShelfActionGlassPanel(
+                    ShelfActionGlassPanelWithSource(
                         onImport = onImport,
                         onCloud = onCloud,
+                        onSources = onSources,
                         onUpdate = onUpdate,
                     )
                 }
@@ -732,9 +785,37 @@ private fun GlassIconButton(label: String, description: String, onClick: () -> U
 }
 
 @Composable
+private fun ShelfActionGlassPanelWithSource(
+    onImport: () -> Unit,
+    onCloud: () -> Unit,
+    onSources: () -> Unit,
+    onUpdate: () -> Unit,
+) {
+    GlassPanel {
+        Text(
+            text = "快捷操作",
+            color = Color(0xFF526079),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Black,
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ShelfActionButton(label = "导入", onClick = onImport, modifier = Modifier.weight(1f))
+            ShelfActionButton(label = "云同步", onClick = onCloud, modifier = Modifier.weight(1f))
+            ShelfActionButton(label = "书源", onClick = onSources, modifier = Modifier.weight(1f))
+            ShelfActionButton(label = "更新", onClick = onUpdate, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
 private fun ShelfActionGlassPanel(
     onImport: () -> Unit,
     onCloud: () -> Unit,
+    onSources: () -> Unit = {},
     onUpdate: () -> Unit,
 ) {
     GlassPanel {
@@ -924,6 +1005,7 @@ private fun BookmarkPanel(
 private fun SettingsPanel(
     onImport: () -> Unit,
     onCloud: () -> Unit,
+    onSources: () -> Unit = {},
     onUpdate: () -> Unit,
 ) {
     LazyColumn(
@@ -965,6 +1047,142 @@ private fun SettingsPanel(
             )
         }
     }
+}
+
+@Composable
+private fun LegadoSourceDialog(
+    sourceRepository: LegadoSourceRepository,
+    novelRepository: NovelRepository,
+    sources: List<LegadoSourceRecord>,
+    onDismiss: () -> Unit,
+    onChanged: () -> Unit,
+    onImportBook: (String, String) -> Unit,
+) {
+    var scriptText by remember { mutableStateOf("") }
+    var importMessage by remember { mutableStateOf("") }
+    var conversionWarnings by remember { mutableStateOf<List<String>>(emptyList()) }
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf<List<LegadoBookItem>>(emptyList()) }
+    var selectedSourceId by remember(sources) { mutableStateOf(sources.firstOrNull()?.id.orEmpty()) }
+    val scope = rememberCoroutineScope()
+
+    fun refreshSources() {
+        onChanged()
+        if (selectedSourceId.isBlank()) {
+            selectedSourceId = sourceRepository.loadSources().firstOrNull()?.id.orEmpty()
+        }
+    }
+
+    fun importScript() {
+        if (scriptText.isBlank()) return
+        runCatching {
+            sourceRepository.importSourceText(scriptText)
+        }.onSuccess {
+            scriptText = ""
+            importMessage = "已导入：${it.name}"
+            refreshSources()
+        }.onFailure {
+            importMessage = "导入失败：${it.message ?: "未知错误"}"
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Legado 书源") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "书源数量：${sources.size}",
+                    color = Color(0xFF526079),
+                    fontSize = 12.sp,
+                )
+                OutlinedTextField(
+                    value = scriptText,
+                    onValueChange = { scriptText = it },
+                    label = { Text("粘贴书源脚本") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { importScript() }) { Text("导入") }
+                    OutlinedButton(onClick = {
+                        val target = selectedSourceId
+                        if (target.isNotBlank()) {
+                            sourceRepository.deleteSource(target)
+                            refreshSources()
+                        }
+                    }) { Text("删除当前") }
+                }
+                if (importMessage.isNotBlank()) {
+                    Text(importMessage, color = Color(0xFF1677FF), fontSize = 12.sp)
+                }
+                Divider()
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    label = { Text("搜索关键词") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        val sourceId = selectedSourceId
+                        if (sourceId.isNotBlank() && searchQuery.isNotBlank()) {
+                            kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+                                runCatching { sourceRepository.search(sourceId, searchQuery) }
+                                    .onSuccess { results -> searchResults = results }
+                            }
+                        }
+                    }) { Text("搜索") }
+                    OutlinedButton(onClick = {
+                        selectedSourceId = sources.firstOrNull()?.id.orEmpty()
+                    }) { Text("重置") }
+                }
+                LazyColumn(
+                    modifier = Modifier.height(260.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(sources, key = { it.id }) { source ->
+                        val enabled = source.enabled
+                        GlassPanel(modifier = Modifier.fillMaxWidth()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(source.name, fontWeight = FontWeight.Black, color = Color(0xFF0E1726))
+                                Text(source.author.ifBlank { source.url }, color = Color(0xFF6B7890), fontSize = 12.sp)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(onClick = { selectedSourceId = source.id }) { Text("选中") }
+                                    OutlinedButton(onClick = {
+                                        sourceRepository.setSourceEnabled(source.id, !enabled)
+                                        refreshSources()
+                                    }) { Text(if (enabled) "停用" else "启用") }
+                                    OutlinedButton(onClick = {
+                                        sourceRepository.deleteSource(source.id)
+                                        refreshSources()
+                                    }) { Text("删除") }
+                                }
+                            }
+                        }
+                    }
+                    items(searchResults, key = { it.bookUrl }) { book ->
+                        GlassPanel(modifier = Modifier.fillMaxWidth()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(book.name, fontWeight = FontWeight.Black, color = Color(0xFF0E1726))
+                                Text(book.author.ifBlank { book.bookUrl }, color = Color(0xFF6B7890), fontSize = 12.sp)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(onClick = {
+                                        val sourceId = selectedSourceId
+                                        if (sourceId.isNotBlank()) onImportBook(sourceId, book.bookUrl)
+                                    }) { Text("导入到书架") }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss) { Text("关闭") }
+        },
+    )
 }
 
 @Composable
@@ -2499,6 +2717,32 @@ class NovelRepository(private val context: Context) {
             id = id,
             title = title,
             fileName = "$id.txt",
+            chapterCount = chapters.size,
+            currentChapter = 0,
+            paragraphIndex = 0,
+            currentChapterTitle = chapters.firstOrNull()?.title.orEmpty(),
+            createdAt = System.currentTimeMillis(),
+            lastReadAt = System.currentTimeMillis(),
+        )
+    }
+
+    fun importTextBook(
+        title: String,
+        text: String,
+        sourceName: String = "",
+        bookUrl: String = "",
+        tocUrl: String = "",
+    ): Book {
+        val normalizedText = text.trim()
+        if (normalizedText.isBlank()) error("姝ｆ枃鍐呭涓虹┖")
+        val id = UUID.randomUUID().toString()
+        val fileName = "$id.txt"
+        val chapters = splitChapters(normalizedText)
+        File(booksDir, fileName).writeText(normalizedText, Charsets.UTF_8)
+        return Book(
+            id = id,
+            title = title.ifBlank { "鏈懡鍚嶅皬璇?" },
+            fileName = fileName,
             chapterCount = chapters.size,
             currentChapter = 0,
             paragraphIndex = 0,
