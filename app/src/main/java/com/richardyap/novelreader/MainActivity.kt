@@ -19,7 +19,9 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.border
@@ -102,6 +104,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLDecoder
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
@@ -110,6 +113,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.zip.ZipFile
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -180,8 +184,12 @@ data class Bookmark(
 data class ReaderPrefs(
     val fontSize: Int = 20,
     val lineHeight: Float = 1.75f,
+    val paragraphSpacing: Int = 14,
+    val pagePadding: Int = 22,
     val theme: String = "paper",
     val pageMode: String = "scroll",
+    val dimLevel: Int = 0,
+    val colorTemperature: Int = 0,
     val customBackgroundPath: String = "",
     val customFontPath: String = "",
 )
@@ -233,7 +241,7 @@ private data class HttpResponse(
 )
 
 private val ChapterTitlePattern = Regex(
-    pattern = """(?im)^[ \t　]*(第[零〇一二三四五六七八九十百千万两\d]+[章节卷回部][^\n]{0,36}|Chapter\s+\d+[^\n]{0,36}|\d{1,4}[、.．]\s*[^\n]{1,36})[ \t　]*$""",
+    pattern = """(?im)^[ \t　]*(第[零〇一二三四五六七八九十百千万两\d]+[章节卷回部集][^\n]{0,42}|Chapter\s+\d+[^\n]{0,42}|\d{1,4}[、.．\-\s]+[^\n]{1,42})[ \t　]*$""",
 )
 
 private val SpecialChapterTitlePattern = Regex(
@@ -369,7 +377,17 @@ private fun NovelReaderApp(
                 repository = repository,
                 books = books,
                 bookmarks = bookmarks,
-                onImport = { importLauncher.launch(arrayOf("text/plain", "application/octet-stream", "*/*")) },
+                onImport = {
+                    importLauncher.launch(
+                        arrayOf(
+                            "text/plain",
+                            "application/epub+zip",
+                            "application/pdf",
+                            "application/octet-stream",
+                            "*/*",
+                        ),
+                    )
+                },
                 onCloud = { showCloudDialog = true },
                 onUpdate = { showUpdateDialog = true },
                 onOpen = { activeBookId = it.id },
@@ -1432,8 +1450,8 @@ private fun ReaderScreen(
         if (target >= 0) return target
         return scrollItems.indexOfFirst { it.chapterIndex == targetChapter }.coerceAtLeast(0)
     }
-    val pages = remember(book.id, chapterIndex, prefs.fontSize, prefs.pageMode) {
-        chapter.toPages(charsPerPage = pageSizeFor(prefs.fontSize))
+    val pages = remember(book.id, chapterIndex, prefs.fontSize, prefs.lineHeight, prefs.pagePadding, prefs.pageMode) {
+        chapter.toPages(charsPerPage = pageSizeFor(prefs.fontSize, prefs.lineHeight, prefs.pagePadding))
     }
     var pageIndex by remember(book.id, chapterIndex, prefs.pageMode) {
         mutableIntStateOf(0)
@@ -1586,22 +1604,22 @@ private fun ReaderScreen(
                     .pointerInput(Unit) {
                         detectTapGestures(onTap = { showChrome = !showChrome })
                     }
-                    .padding(horizontal = 22.dp),
+                    .padding(horizontal = prefs.pagePadding.coerceIn(12, 42).dp),
             ) {
                 itemsIndexed(scrollItems) { index, item ->
                     if (item.isTitle) {
-                        Spacer(Modifier.height(if (index == 0 && !showChrome) 0.dp else 18.dp))
+                        Spacer(Modifier.height(if (index == 0 && !showChrome) 6.dp else 18.dp))
                         Text(
                             text = item.title,
                             color = colors.text,
-                            fontSize = 17.sp,
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
-                            lineHeight = 24.sp,
+                            lineHeight = 21.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             fontFamily = customFont,
                         )
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(12.dp))
                     } else {
                         Text(
                             text = item.text,
@@ -1609,11 +1627,11 @@ private fun ReaderScreen(
                             fontSize = prefs.fontSize.sp,
                             lineHeight = (prefs.fontSize * prefs.lineHeight).sp,
                             fontFamily = customFont,
-                            modifier = Modifier.padding(bottom = 14.dp),
+                            modifier = Modifier.padding(bottom = prefs.paragraphSpacing.coerceIn(4, 30).dp),
                         )
                     }
                 }
-                item { Spacer(Modifier.height(22.dp)) }
+                item { Spacer(Modifier.height(10.dp)) }
             }
         } else {
             PagedReaderContent(
@@ -1662,6 +1680,20 @@ private fun ReaderScreen(
                         )
                     }
                 },
+            )
+        }
+        if (prefs.colorTemperature > 0) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFFFDFA8).copy(alpha = prefs.colorTemperature.coerceIn(0, 60) / 180f)),
+            )
+        }
+        if (prefs.dimLevel > 0) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = prefs.dimLevel.coerceIn(0, 70) / 100f)),
             )
         }
         AnimatedVisibility(
@@ -1879,9 +1911,12 @@ private fun PagedReaderContent(
                     }
                 }
             }
-            .padding(horizontal = 24.dp, vertical = 24.dp),
+            .padding(
+                horizontal = prefs.pagePadding.coerceIn(12, 42).dp,
+                vertical = 18.dp,
+            ),
     ) {
-        Column(Modifier.padding(bottom = 30.dp)) {
+        Column(Modifier.padding(bottom = 40.dp)) {
             if (showChapterTitle) {
                 Text(
                     text = title,
@@ -1906,7 +1941,15 @@ private fun PagedReaderContent(
             } else {
                 AnimatedContent(
                     targetState = pageIndex,
-                    transitionSpec = { fadeIn(tween(150)) togetherWith fadeOut(tween(120)) },
+                    transitionSpec = {
+                        if (targetState > initialState) {
+                            (slideInHorizontally(tween(220)) { it / 5 } + fadeIn(tween(180))) togetherWith
+                                (slideOutHorizontally(tween(180)) { -it / 8 } + fadeOut(tween(140)))
+                        } else {
+                            (slideInHorizontally(tween(220)) { -it / 5 } + fadeIn(tween(180))) togetherWith
+                                (slideOutHorizontally(tween(180)) { it / 8 } + fadeOut(tween(140)))
+                        }
+                    },
                     label = "pageContent",
                 ) { targetPage ->
                     Text(
@@ -2226,6 +2269,24 @@ private fun ReaderSettingsDialog(
                     )
                 }
                 item {
+                    Text("段距：${prefs.paragraphSpacing}")
+                    Slider(
+                        value = prefs.paragraphSpacing.toFloat(),
+                        onValueChange = { onChange(prefs.copy(paragraphSpacing = it.roundToInt())) },
+                        valueRange = 4f..30f,
+                        steps = 12,
+                    )
+                }
+                item {
+                    Text("页边距：${prefs.pagePadding}")
+                    Slider(
+                        value = prefs.pagePadding.toFloat(),
+                        onValueChange = { onChange(prefs.copy(pagePadding = it.roundToInt())) },
+                        valueRange = 12f..42f,
+                        steps = 14,
+                    )
+                }
+                item {
                     Text("翻页方式")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         ThemeButton("滚动", prefs.pageMode == "scroll") { onChange(prefs.copy(pageMode = "scroll")) }
@@ -2236,10 +2297,35 @@ private fun ReaderSettingsDialog(
                 item {
                     Text("背景")
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ThemeButton("白色", prefs.theme == "white") { onChange(prefs.copy(theme = "white")) }
                         ThemeButton("纸色", prefs.theme == "paper") { onChange(prefs.copy(theme = "paper")) }
                         ThemeButton("青绿", prefs.theme == "green") { onChange(prefs.copy(theme = "green")) }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        ThemeButton("羊皮", prefs.theme == "parchment") { onChange(prefs.copy(theme = "parchment")) }
+                        ThemeButton("护眼", prefs.theme == "eye") { onChange(prefs.copy(theme = "eye")) }
+                        ThemeButton("墨黑", prefs.theme == "ink") { onChange(prefs.copy(theme = "ink")) }
                         ThemeButton("夜间", prefs.theme == "dark") { onChange(prefs.copy(theme = "dark")) }
                     }
+                }
+                item {
+                    Text("亮度遮罩：${prefs.dimLevel}%")
+                    Slider(
+                        value = prefs.dimLevel.toFloat(),
+                        onValueChange = { onChange(prefs.copy(dimLevel = it.roundToInt())) },
+                        valueRange = 0f..70f,
+                        steps = 13,
+                    )
+                }
+                item {
+                    Text("暖色护眼：${prefs.colorTemperature}")
+                    Slider(
+                        value = prefs.colorTemperature.toFloat(),
+                        onValueChange = { onChange(prefs.copy(colorTemperature = it.roundToInt())) },
+                        valueRange = 0f..60f,
+                        steps = 11,
+                    )
                 }
                 item {
                     Text("自定义背景")
@@ -2299,6 +2385,50 @@ private data class ReaderPalette(
 )
 
 private fun readerColors(theme: String): ReaderPalette = when (theme) {
+    "white" -> ReaderPalette(
+        background = Color(0xFFFFFFFF),
+        toolbar = Color(0xF5FFFFFF),
+        toolbarText = Color(0xFF111827),
+        chrome = Color(0xF4FFFFFF),
+        chromeSoft = Color(0xF4FFFFFF),
+        text = Color(0xFF111827),
+        secondaryText = Color(0xFF667085),
+        divider = Color(0xFFE5E7EB),
+        accent = Color(0xFF1677FF),
+    )
+    "parchment" -> ReaderPalette(
+        background = Color(0xFFF7E8C8),
+        toolbar = Color(0xF2EAD2A8),
+        toolbarText = Color(0xFF4B3527),
+        chrome = Color(0xEFEEDAB0),
+        chromeSoft = Color(0xEEF7E8C8),
+        text = Color(0xFF2D2118),
+        secondaryText = Color(0xFF7B654E),
+        divider = Color(0xFFD9C49C),
+        accent = Color(0xFFB86B3D),
+    )
+    "eye" -> ReaderPalette(
+        background = Color(0xFFEAF5E8),
+        toolbar = Color(0xF2DDEDDD),
+        toolbarText = Color(0xFF183A2A),
+        chrome = Color(0xEEDDEDDD),
+        chromeSoft = Color(0xEEEAF5E8),
+        text = Color(0xFF10251A),
+        secondaryText = Color(0xFF5F7467),
+        divider = Color(0xFFC9DEC9),
+        accent = Color(0xFF2D8A58),
+    )
+    "ink" -> ReaderPalette(
+        background = Color(0xFF050608),
+        toolbar = Color(0xF216171B),
+        toolbarText = Color(0xFFECEFF4),
+        chrome = Color(0xE816171B),
+        chromeSoft = Color(0xEE050608),
+        text = Color(0xFFD8DCE4),
+        secondaryText = Color(0xFF9AA3B2),
+        divider = Color(0xFF252934),
+        accent = Color(0xFF7AA7FF),
+    )
     "dark" -> ReaderPalette(
         background = Color(0xFF101114),
         toolbar = Color(0xFF202124),
@@ -2312,10 +2442,10 @@ private fun readerColors(theme: String): ReaderPalette = when (theme) {
     )
     "green" -> ReaderPalette(
         background = Color(0xFFF5F7F4),
-        toolbar = Color(0xFF496A58),
-        toolbarText = Color.White,
-        chrome = Color(0xFFF0F2EF),
-        chromeSoft = Color(0xFFFFFFFF),
+        toolbar = Color(0xF0F0F7F4),
+        toolbarText = Color(0xFF1B3326),
+        chrome = Color(0xEEF0F7F4),
+        chromeSoft = Color(0xEEF5F7F4),
         text = Color(0xFF161A18),
         secondaryText = Color(0xFF686E69),
         divider = Color(0xFFE0E5DF),
@@ -2346,7 +2476,18 @@ class NovelRepository(private val context: Context) {
         val displayName = getDisplayName(uri).ifBlank { "未命名小说.txt" }
         val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             ?: error("文件为空")
-        val text = decodeText(bytes).trim()
+        val extension = displayName.substringAfterLast('.', "").lowercase(Locale.CHINA)
+        val mimeType = context.contentResolver.getType(uri).orEmpty().lowercase(Locale.CHINA)
+        val text = when {
+            extension == "epub" || mimeType == "application/epub+zip" -> importEpubText(bytes)
+            extension == "pdf" || mimeType == "application/pdf" -> {
+                error("PDF 暂未接入正文解析，下一阶段会使用独立解析库处理")
+            }
+            extension == "mobi" || extension == "azw3" -> {
+                error("MOBI/AZW3 暂未接入正文解析，后续会单独适配")
+            }
+            else -> decodeText(bytes)
+        }.trim()
         if (text.isBlank()) error("没有读到正文内容")
 
         val id = UUID.randomUUID().toString()
@@ -2365,6 +2506,63 @@ class NovelRepository(private val context: Context) {
             createdAt = System.currentTimeMillis(),
             lastReadAt = System.currentTimeMillis(),
         )
+    }
+
+    private fun importEpubText(bytes: ByteArray): String {
+        val temp = File.createTempFile("novel-import-", ".epub", context.cacheDir)
+        return try {
+            temp.writeBytes(bytes)
+            ZipFile(temp).use { zip ->
+                val opfPath = zip.readTextEntry("META-INF/container.xml")
+                    ?.let { findOpfPath(it) }
+                val spinePaths = opfPath
+                    ?.let { path -> epubSpinePaths(zip, path) }
+                    .orEmpty()
+                val htmlPaths = if (spinePaths.isNotEmpty()) {
+                    spinePaths
+                } else {
+                    zip.entries().asSequence()
+                        .map { it.name }
+                        .filter { it.endsWith(".xhtml", true) || it.endsWith(".html", true) || it.endsWith(".htm", true) }
+                        .sorted()
+                        .toList()
+                }
+
+                val sections = htmlPaths.mapIndexedNotNull { index, path ->
+                    val html = zip.readTextEntry(path) ?: return@mapIndexedNotNull null
+                    val text = htmlToReadableText(html).takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
+                    val firstLine = text.lineSequence().firstOrNull()?.trim().orEmpty()
+                    if (isChapterTitleLine(firstLine)) {
+                        text
+                    } else {
+                        val title = extractHtmlTitle(html).ifBlank { firstLine }.ifBlank { "EPUB 章节 ${index + 1}" }
+                        "第${index + 1}章 $title\n$text"
+                    }
+                }
+                sections.joinToString("\n\n")
+            }.ifBlank { error("没有读到 EPUB 正文内容") }
+        } finally {
+            temp.delete()
+        }
+    }
+
+    private fun epubSpinePaths(zip: ZipFile, opfPath: String): List<String> {
+        val opf = zip.readTextEntry(opfPath) ?: return emptyList()
+        val manifest = Regex("""<item\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*/?>""", RegexOption.IGNORE_CASE)
+            .findAll(opf)
+            .associate { match -> match.groupValues[1] to match.groupValues[2].decodeUrlPath() }
+        val reverseManifest = Regex("""<item\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*\bid\s*=\s*["']([^"']+)["'][^>]*/?>""", RegexOption.IGNORE_CASE)
+            .findAll(opf)
+            .associate { match -> match.groupValues[2] to match.groupValues[1].decodeUrlPath() }
+        val items = manifest + reverseManifest
+        val baseDir = opfPath.substringBeforeLast('/', "")
+        return Regex("""<itemref\b[^>]*\bidref\s*=\s*["']([^"']+)["'][^>]*/?>""", RegexOption.IGNORE_CASE)
+            .findAll(opf)
+            .mapNotNull { match -> items[match.groupValues[1]] }
+            .map { href -> if (baseDir.isBlank()) href else "$baseDir/$href" }
+            .map { it.normalizeZipPath() }
+            .distinct()
+            .toList()
     }
 
     fun loadBookText(book: Book): String = File(booksDir, book.fileName)
@@ -2407,8 +2605,12 @@ class NovelRepository(private val context: Context) {
     fun loadReaderPrefs(): ReaderPrefs = ReaderPrefs(
         fontSize = readerPrefs.getInt("font_size", 20),
         lineHeight = readerPrefs.getFloat("line_height", 1.75f),
+        paragraphSpacing = readerPrefs.getInt("paragraph_spacing", 14),
+        pagePadding = readerPrefs.getInt("page_padding", 22),
         theme = readerPrefs.getString("theme", "paper") ?: "paper",
         pageMode = readerPrefs.getString("page_mode", "scroll") ?: "scroll",
+        dimLevel = readerPrefs.getInt("dim_level", 0),
+        colorTemperature = readerPrefs.getInt("color_temperature", 0),
         customBackgroundPath = readerPrefs.getString("custom_background_path", "") ?: "",
         customFontPath = readerPrefs.getString("custom_font_path", "") ?: "",
     )
@@ -2417,8 +2619,12 @@ class NovelRepository(private val context: Context) {
         readerPrefs.edit()
             .putInt("font_size", prefs.fontSize)
             .putFloat("line_height", prefs.lineHeight)
+            .putInt("paragraph_spacing", prefs.paragraphSpacing)
+            .putInt("page_padding", prefs.pagePadding)
             .putString("theme", prefs.theme)
             .putString("page_mode", prefs.pageMode)
+            .putInt("dim_level", prefs.dimLevel)
+            .putInt("color_temperature", prefs.colorTemperature)
             .putString("custom_background_path", prefs.customBackgroundPath)
             .putString("custom_font_path", prefs.customFontPath)
             .apply()
@@ -2507,8 +2713,12 @@ class NovelRepository(private val context: Context) {
                 ReaderPrefs(
                     fontSize = remotePrefs.optInt("fontSize", 20),
                     lineHeight = remotePrefs.optDouble("lineHeight", 1.75).toFloat(),
+                    paragraphSpacing = remotePrefs.optInt("paragraphSpacing", 14),
+                    pagePadding = remotePrefs.optInt("pagePadding", 22),
                     theme = remotePrefs.optString("theme", "paper"),
                     pageMode = remotePrefs.optString("pageMode", "scroll"),
+                    dimLevel = remotePrefs.optInt("dimLevel", 0),
+                    colorTemperature = remotePrefs.optInt("colorTemperature", 0),
                     customBackgroundPath = remotePrefs.optString("customBackgroundPath", ""),
                     customFontPath = remotePrefs.optString("customFontPath", ""),
                 ),
@@ -2606,8 +2816,12 @@ class NovelRepository(private val context: Context) {
                 JSONObject()
                     .put("fontSize", prefs.fontSize)
                     .put("lineHeight", prefs.lineHeight)
+                    .put("paragraphSpacing", prefs.paragraphSpacing)
+                    .put("pagePadding", prefs.pagePadding)
                     .put("theme", prefs.theme)
                     .put("pageMode", prefs.pageMode)
+                    .put("dimLevel", prefs.dimLevel)
+                    .put("colorTemperature", prefs.colorTemperature)
                     .put("customBackgroundPath", prefs.customBackgroundPath)
                     .put("customFontPath", prefs.customFontPath),
             )
@@ -2791,11 +3005,15 @@ private fun Chapter.toPages(charsPerPage: Int): List<String> {
         .ifEmpty { listOf(title) }
 }
 
-private fun pageSizeFor(fontSize: Int): Int = when {
-    fontSize >= 28 -> 260
-    fontSize >= 24 -> 340
-    fontSize >= 20 -> 460
-    else -> 580
+private fun pageSizeFor(fontSize: Int, lineHeight: Float, pagePadding: Int): Int = when {
+    fontSize >= 28 -> 230
+    fontSize >= 24 -> 300
+    fontSize >= 20 -> 410
+    else -> 520
+}.let { base ->
+    val lineFactor = (1.75f / lineHeight).coerceIn(0.72f, 1.14f)
+    val paddingFactor = (1f - ((pagePadding.coerceIn(12, 42) - 22) * 0.008f)).coerceIn(0.82f, 1.08f)
+    (base * lineFactor * paddingFactor).roundToInt().coerceAtLeast(180)
 }
 
 private fun searchChapters(chapters: List<Chapter>, query: String): List<SearchResult> {
@@ -2861,6 +3079,87 @@ private fun decodeText(bytes: ByteArray): String {
 }
 
 private fun String.stripBom(): String = removePrefix("\uFEFF")
+
+private fun ZipFile.readTextEntry(path: String): String? {
+    val entry = getEntry(path) ?: getEntry(path.normalizeZipPath()) ?: return null
+    return getInputStream(entry).use { input -> decodeText(input.readBytes()) }
+}
+
+private fun findOpfPath(containerXml: String): String? {
+    return Regex("""full-path\s*=\s*["']([^"']+\.opf)["']""", RegexOption.IGNORE_CASE)
+        .find(containerXml)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.decodeUrlPath()
+        ?.normalizeZipPath()
+}
+
+private fun htmlToReadableText(html: String): String {
+    val withBreaks = html
+        .replace(Regex("""(?is)<\s*(h[1-6]|title)\b[^>]*>"""), "\n\n")
+        .replace(Regex("""(?is)</\s*(h[1-6]|title)\s*>"""), "\n\n")
+        .replace(Regex("""(?is)<\s*(p|div|section|article|li|br)\b[^>]*>"""), "\n")
+        .replace(Regex("""(?is)</\s*(p|div|section|article|li)\s*>"""), "\n")
+        .replace(Regex("""(?is)<script\b[^>]*>.*?</script>"""), "")
+        .replace(Regex("""(?is)<style\b[^>]*>.*?</style>"""), "")
+        .replace(Regex("""(?is)<[^>]+>"""), "")
+    return decodeHtmlEntities(withBreaks)
+        .replace(Regex("""[ \t\u00A0]+"""), " ")
+        .replace(Regex("""\n[ \t]+"""), "\n")
+        .replace(Regex("""\n{3,}"""), "\n\n")
+        .lines()
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .joinToString("\n")
+}
+
+private fun extractHtmlTitle(html: String): String {
+    return Regex("""(?is)<\s*(?:h1|h2|h3|title)\b[^>]*>(.*?)</\s*(?:h1|h2|h3|title)\s*>""")
+        .find(html)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.let { htmlToReadableText(it).lineSequence().firstOrNull().orEmpty() }
+        .orEmpty()
+        .take(42)
+}
+
+private fun isChapterTitleLine(line: String): Boolean {
+    if (line.isBlank() || line.length > 64) return false
+    return ChapterTitlePattern.matches(line) || SpecialChapterTitlePattern.matches(line)
+}
+
+private fun decodeHtmlEntities(value: String): String {
+    return value
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace(Regex("""&#(\d+);""")) { match ->
+            match.groupValues[1].toIntOrNull()?.let { code -> code.toChar().toString() } ?: match.value
+        }
+        .replace(Regex("""&#x([0-9a-fA-F]+);""")) { match ->
+            match.groupValues[1].toIntOrNull(16)?.let { code -> code.toChar().toString() } ?: match.value
+        }
+}
+
+private fun String.decodeUrlPath(): String = runCatching {
+    URLDecoder.decode(this, "UTF-8")
+}.getOrDefault(this)
+
+private fun String.normalizeZipPath(): String {
+    val parts = split('/').filter { it.isNotBlank() && it != "." }
+    val stack = mutableListOf<String>()
+    parts.forEach { part ->
+        if (part == "..") {
+            if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex)
+        } else {
+            stack += part
+        }
+    }
+    return stack.joinToString("/")
+}
 
 private fun isVersionNameNewer(remote: String, local: String): Boolean {
     val remoteParts = remote.versionNumbers()

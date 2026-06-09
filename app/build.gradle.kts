@@ -12,8 +12,8 @@ android {
         applicationId = "com.richardyap.novelreader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.8.0"
+        versionCode = 21
+        versionName = "0.9.0"
     }
 
     buildTypes {
