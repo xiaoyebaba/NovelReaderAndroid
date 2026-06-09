@@ -38,6 +38,105 @@ class LegadoSourceRepository(private val context: Context) {
 
     fun importSourceText(script: String): LegadoSourceRecord = store.importScript(script)
 
+    suspend fun importSourceFromUrl(url: String): List<LegadoSourceRecord> = withContext(Dispatchers.IO) {
+        val text = fetchRemoteScript(url)
+        batchImportSourceText(text)
+    }
+
+    fun batchImportSourceText(script: String): List<LegadoSourceRecord> {
+        val trimmed = script.trim()
+        if (trimmed.isBlank()) error("书源内容为空")
+
+        // Detect JSON array (Legado export format)
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            return runCatching { JSONArray(trimmed) }.getOrNull()?.let { array ->
+                List(array.length()) { index ->
+                    val item = array.opt(index)
+                    when (item) {
+                        is JSONObject -> store.importScript(item.toString())
+                        is String -> store.importScript(item)
+                        else -> null
+                    }
+                }.filterNotNull()
+            } ?: error("无法解析 JSON 数组")
+        }
+
+        // Split by // @name markers — each source script starts with its own header
+        val blocks = splitSourceScripts(trimmed)
+        if (blocks.size <= 1) {
+            return listOf(store.importScript(trimmed))
+        }
+        return blocks.map { block -> store.importScript(block) }
+    }
+
+    suspend fun checkSourceHealth(sourceId: String): SourceHealthResult = withContext(Dispatchers.IO) {
+        val source = loadSources().firstOrNull { it.id == sourceId && it.enabled }
+            ?: return@withContext SourceHealthResult(ok = false, message = "书源已停用或不存在")
+        try {
+            val results = search(sourceId, "测试", page = 1)
+            if (results.isEmpty()) {
+                SourceHealthResult(ok = true, message = "连接成功，但搜索"测试"无结果")
+            } else {
+                SourceHealthResult(ok = true, message = "正常，找到 ${results.size} 条结果")
+            }
+        } catch (e: Exception) {
+            SourceHealthResult(ok = false, message = "失败：${e.message ?: "未知错误"}")
+        }
+    }
+
+    fun exportSourcesAsJson(): String {
+        val records = loadSources()
+        val array = JSONArray()
+        records.forEach { record ->
+            val script = store.loadScript(record)
+            val obj = JSONObject()
+            obj.put("name", record.name)
+            obj.put("version", record.version)
+            obj.put("author", record.author)
+            obj.put("url", record.url)
+            obj.put("group", record.group)
+            obj.put("type", record.type)
+            obj.put("enabled", record.enabled)
+            obj.put("minDelay", record.minDelay)
+            if (record.tags.isNotEmpty()) obj.put("tags", JSONArray(record.tags))
+            if (record.description.isNotBlank()) obj.put("description", record.description)
+            if (record.updateUrl.isNotBlank()) obj.put("updateUrl", record.updateUrl)
+            obj.put("script", script)
+            array.put(obj)
+        }
+        return array.toString(2)
+    }
+
+    fun exportSourcesAsScripts(): String {
+        val records = loadSources()
+        return records.joinToString("\n\n") { record ->
+            store.loadScript(record).ifBlank { "// ${record.name} — 脚本文件缺失" }
+        }
+    }
+
+    suspend fun updateSource(sourceId: String): LegadoSourceRecord = withContext(Dispatchers.IO) {
+        val oldRecord = loadSources().firstOrNull { it.id == sourceId }
+            ?: error("书源不存在")
+        val updateUrl = oldRecord.updateUrl.ifBlank { error("该书源没有设置更新地址") }
+        val newScript = fetchRemoteScript(updateUrl)
+        val updatedMeta = parseLegadoSourceMeta(newScript)
+        if (updatedMeta.name.isBlank()) error("远程脚本缺少 @name")
+        val updatedRecord = oldRecord.copy(
+            name = updatedMeta.name.ifBlank { oldRecord.name },
+            version = updatedMeta.version.ifBlank { oldRecord.version },
+            author = updatedMeta.author.ifBlank { oldRecord.author },
+            url = updatedMeta.urls.firstOrNull() ?: oldRecord.url,
+            group = updatedMeta.group.ifBlank { oldRecord.group },
+            type = updatedMeta.type.ifBlank { oldRecord.type },
+            description = updatedMeta.description.ifBlank { oldRecord.description },
+            updateUrl = updatedMeta.updateUrl.ifBlank { oldRecord.updateUrl },
+            requireUrls = updatedMeta.requireUrls.ifBlank { oldRecord.requireUrls },
+        )
+        store.save(updatedRecord, newScript)
+        synchronized(runtimes) { runtimes.remove(sourceId)?.close() }
+        updatedRecord
+    }
+
     fun deleteSource(sourceId: String) {
         synchronized(runtimes) {
             runtimes.remove(sourceId)?.close()

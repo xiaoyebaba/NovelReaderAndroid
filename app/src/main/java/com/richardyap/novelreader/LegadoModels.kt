@@ -41,3 +41,8 @@ data class LegadoChapterInfo(
     val vip: Boolean = false,
 )
 
+data class SourceHealthResult(
+    val ok: Boolean,
+    val message: String,
+)
+

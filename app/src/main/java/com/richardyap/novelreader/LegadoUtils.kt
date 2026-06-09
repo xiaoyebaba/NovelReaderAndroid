@@ -98,3 +98,21 @@ fun JSONObject.toStringMap(): Map<String, String> {
 }
 
 fun UUID.fileNameJs(): String = "$this.js"
+
+fun splitSourceScripts(text: String): List<String> {
+    val trimmed = text.trim()
+    if (trimmed.isBlank()) return emptyList()
+
+    // Find all positions of // @name (at start of lines)
+    val namePattern = Regex("(?m)^//\\s*@name\\s+")
+    val positions = namePattern.findAll(trimmed).map { it.range.first }.toList()
+    if (positions.size <= 1) return listOf(trimmed)
+
+    val blocks = mutableListOf<String>()
+    for (i in positions.indices) {
+        val start = positions[i]
+        val end = if (i + 1 < positions.size) positions[i + 1] else trimmed.length
+        blocks.add(trimmed.substring(start, end).trim())
+    }
+    return blocks
+}
