@@ -75,7 +75,7 @@ class LegadoSourceRepository(private val context: Context) {
         try {
             val results = search(sourceId, "测试", page = 1)
             if (results.isEmpty()) {
-                SourceHealthResult(ok = true, message = "连接成功，但搜索"测试"无结果")
+                SourceHealthResult(ok = true, message = "连接成功，但搜索「测试」无结果")
             } else {
                 SourceHealthResult(ok = true, message = "正常，找到 ${results.size} 条结果")
             }
