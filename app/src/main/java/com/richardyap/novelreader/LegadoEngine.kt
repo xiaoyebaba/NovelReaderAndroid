@@ -130,7 +130,7 @@ class LegadoSourceRepository(private val context: Context) {
             type = updatedMeta.type.ifBlank { oldRecord.type },
             description = updatedMeta.description.ifBlank { oldRecord.description },
             updateUrl = updatedMeta.updateUrl.ifBlank { oldRecord.updateUrl },
-            requireUrls = updatedMeta.requireUrls.ifBlank { oldRecord.requireUrls },
+            requireUrls = updatedMeta.requireUrls.ifEmpty { oldRecord.requireUrls },
         )
         store.save(updatedRecord, newScript)
         synchronized(runtimes) { runtimes.remove(sourceId)?.close() }
